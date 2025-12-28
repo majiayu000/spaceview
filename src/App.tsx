@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -17,6 +17,94 @@ import {
   formatSize,
 } from "./types";
 import { layoutTreemap } from "./treemap";
+
+// Memoized container cell component to prevent re-renders
+const TreemapContainerCell = React.memo(function TreemapContainerCell({
+  rect,
+  onHover,
+  onLeave,
+  onNavigate,
+  onContextMenu,
+}: {
+  rect: TreemapRect;
+  onHover: (node: FileNode, e: React.MouseEvent) => void;
+  onLeave: () => void;
+  onNavigate: (node: FileNode) => void;
+  onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
+}) {
+  return (
+    <div
+      className={`treemap-container-cell depth-${rect.depth}`}
+      style={{
+        left: rect.x,
+        top: rect.y,
+        width: rect.width,
+        height: rect.height,
+      }}
+      onMouseEnter={(e) => onHover(rect.node, e)}
+      onMouseMove={(e) => onHover(rect.node, e)}
+      onMouseLeave={onLeave}
+      onDoubleClick={() => onNavigate(rect.node)}
+      onContextMenu={(e) => onContextMenu(e, rect.node)}
+    >
+      {rect.height > 50 && (
+        <div className="treemap-container-header">
+          <span className="treemap-container-name">{rect.node.name}</span>
+          <span className="treemap-container-size">{formatSize(rect.node.size)}</span>
+        </div>
+      )}
+    </div>
+  );
+});
+
+// Memoized leaf cell component to prevent re-renders
+const TreemapLeafCell = React.memo(function TreemapLeafCell({
+  rect,
+  onHover,
+  onLeave,
+  onNavigate,
+  onContextMenu,
+}: {
+  rect: TreemapRect;
+  onHover: (node: FileNode, e: React.MouseEvent) => void;
+  onLeave: () => void;
+  onNavigate: (node: FileNode) => void;
+  onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
+}) {
+  return (
+    <div
+      className={`treemap-cell depth-${rect.depth}`}
+      style={{
+        left: rect.x,
+        top: rect.y,
+        width: rect.width,
+        height: rect.height,
+        background: getFileGradient(rect.node),
+      }}
+      onMouseEnter={(e) => onHover(rect.node, e)}
+      onMouseMove={(e) => onHover(rect.node, e)}
+      onMouseLeave={onLeave}
+      onDoubleClick={() => onNavigate(rect.node)}
+      onContextMenu={(e) => onContextMenu(e, rect.node)}
+    >
+      {rect.width > 50 && rect.height > 35 && (
+        <>
+          {rect.height > 60 && (
+            <div className="treemap-cell-icon">
+              {getFileIcon(rect.node)}
+            </div>
+          )}
+          <div className="treemap-cell-name">{rect.node.name}</div>
+          {rect.height > 55 && (
+            <div className="treemap-cell-size">
+              {formatSize(rect.node.size)}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+});
 
 interface ErrorNotification {
   id: number;
@@ -253,6 +341,16 @@ function App() {
     });
   }, [treemapRects, filterType, searchText]);
 
+  // Stable callbacks for memoized treemap cells
+  const handleCellHover = useCallback((node: FileNode, e: React.MouseEvent) => {
+    setHoveredNode(node);
+    setTooltipPos({ x: e.clientX + 16, y: e.clientY + 16 });
+  }, []);
+
+  const handleCellLeave = useCallback(() => {
+    setHoveredNode(null);
+  }, []);
+
   return (
     <>
       {/* Toolbar */}
@@ -466,63 +564,23 @@ function App() {
           <div className="treemap-container" ref={containerRef}>
             {filteredRects.map((rect) => (
               rect.isContainer ? (
-                // Container folder - shows border and header only
-                <div
+                <TreemapContainerCell
                   key={rect.id + "-container"}
-                  className={`treemap-container-cell depth-${rect.depth}`}
-                  style={{
-                    left: rect.x,
-                    top: rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                  }}
-                  onMouseEnter={() => setHoveredNode(rect.node)}
-                  onMouseMove={(e) => setTooltipPos({ x: e.clientX + 16, y: e.clientY + 16 })}
-                  onMouseLeave={() => setHoveredNode(null)}
-                  onDoubleClick={() => navigateTo(rect.node)}
-                  onContextMenu={(e) => handleContextMenu(e, rect.node)}
-                >
-                  {rect.height > 50 && (
-                    <div className="treemap-container-header">
-                      <span className="treemap-container-name">{rect.node.name}</span>
-                      <span className="treemap-container-size">{formatSize(rect.node.size)}</span>
-                    </div>
-                  )}
-                </div>
+                  rect={rect}
+                  onHover={handleCellHover}
+                  onLeave={handleCellLeave}
+                  onNavigate={navigateTo}
+                  onContextMenu={handleContextMenu}
+                />
               ) : (
-                // Leaf node - file or small folder
-                <div
+                <TreemapLeafCell
                   key={rect.id}
-                  className={`treemap-cell depth-${rect.depth}`}
-                  style={{
-                    left: rect.x,
-                    top: rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                    background: getFileGradient(rect.node),
-                  }}
-                  onMouseEnter={() => setHoveredNode(rect.node)}
-                  onMouseMove={(e) => setTooltipPos({ x: e.clientX + 16, y: e.clientY + 16 })}
-                  onMouseLeave={() => setHoveredNode(null)}
-                  onDoubleClick={() => navigateTo(rect.node)}
-                  onContextMenu={(e) => handleContextMenu(e, rect.node)}
-                >
-                  {rect.width > 50 && rect.height > 35 && (
-                    <>
-                      {rect.height > 60 && (
-                        <div className="treemap-cell-icon">
-                          {getFileIcon(rect.node)}
-                        </div>
-                      )}
-                      <div className="treemap-cell-name">{rect.node.name}</div>
-                      {rect.height > 55 && (
-                        <div className="treemap-cell-size">
-                          {formatSize(rect.node.size)}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
+                  rect={rect}
+                  onHover={handleCellHover}
+                  onLeave={handleCellLeave}
+                  onNavigate={navigateTo}
+                  onContextMenu={handleContextMenu}
+                />
               )
             ))}
           </div>
