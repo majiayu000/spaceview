@@ -54,8 +54,9 @@ fn get_memory_usage() -> u64 {
     0
 }
 
-const MAX_CHILDREN: usize = 100;  // Show more items before grouping
-const MAX_DEPTH: usize = 20;     // Support deeper directory trees
+const MAX_CHILDREN: usize = 50;   // Limit children per directory for performance
+const MAX_DEPTH: usize = 12;      // Limit tree depth to prevent memory issues
+const MAX_TOTAL_NODES: usize = 50_000;  // Absolute limit on total nodes in tree
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
@@ -366,10 +367,12 @@ impl Scanner {
             phase: "tree".to_string(),
         });
         let tree_start = Instant::now();
-        println!("[Phase 4] Building output tree (depth={}, max_children={})...", MAX_DEPTH, MAX_CHILDREN);
-        let tree = self.build_tree_dashmap(&nodes, root_path, 0);
+        println!("[Phase 4] Building output tree (depth={}, max_children={}, max_nodes={})...", MAX_DEPTH, MAX_CHILDREN, MAX_TOTAL_NODES);
+        let tree_node_count = AtomicU64::new(0);
+        let tree = self.build_tree_dashmap(&nodes, root_path, 0, &tree_node_count);
+        let final_node_count = tree_node_count.load(Ordering::Relaxed);
         let tree_time = tree_start.elapsed();
-        println!("[Phase 4] Tree built in {:?}", tree_time);
+        println!("[Phase 4] Tree built in {:?} ({} nodes for UI)", tree_time, final_node_count);
 
         // Final summary
         let total_time = total_start.elapsed();
@@ -462,9 +465,17 @@ impl Scanner {
         }
     }
 
-    fn build_tree_dashmap(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path, depth: usize) -> Option<FileNode> {
+    fn build_tree_dashmap(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path, depth: usize, node_count: &AtomicU64) -> Option<FileNode> {
+        // Check if we've hit the total node limit
+        if node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64 {
+            return None;
+        }
+
         let node = nodes.get(path)?;
         let path_str = path.to_string_lossy().to_string();
+
+        // Increment node count
+        node_count.fetch_add(1, Ordering::Relaxed);
 
         if !node.is_dir {
             return Some(FileNode {
@@ -497,9 +508,20 @@ impl Scanner {
         let mut other_dir_count: u64 = 0;
 
         for (i, child_path) in children_sorted.iter().enumerate() {
-            if i < MAX_CHILDREN && depth < MAX_DEPTH {
-                if let Some(child) = self.build_tree_dashmap(nodes, child_path, depth + 1) {
+            // Check total node limit before recursing
+            let at_limit = node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64;
+
+            if i < MAX_CHILDREN && depth < MAX_DEPTH && !at_limit {
+                if let Some(child) = self.build_tree_dashmap(nodes, child_path, depth + 1, node_count) {
                     children.push(child);
+                } else if let Some(cn) = nodes.get(child_path) {
+                    // Node was skipped due to limit, count as "other"
+                    other_size += cn.size;
+                    if cn.is_dir {
+                        other_dir_count += 1;
+                    } else {
+                        other_file_count += 1;
+                    }
                 }
             } else {
                 if let Some(cn) = nodes.get(child_path) {

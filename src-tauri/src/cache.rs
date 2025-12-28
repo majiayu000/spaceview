@@ -7,8 +7,8 @@ use crate::scanner::FileNode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufReader, BufWriter};
-use std::path::{Path, PathBuf};
+use std::io::BufReader;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Cache metadata and scan results
@@ -52,6 +52,9 @@ fn get_cache_path(scan_path: &str) -> Option<PathBuf> {
     Some(cache_dir.join(format!("{}.bin", key)))
 }
 
+/// Maximum cache size (500MB) to prevent memory issues
+const MAX_CACHE_SIZE: u64 = 500 * 1024 * 1024;
+
 /// Save scan results to cache
 pub fn save_to_cache(scan_path: &str, root: &FileNode) -> Result<PathBuf, String> {
     let cache_dir = get_cache_dir().ok_or("Could not determine cache directory")?;
@@ -81,15 +84,24 @@ pub fn save_to_cache(scan_path: &str, root: &FileNode) -> Result<PathBuf, String
         root: root.clone(),
     };
 
-    // Serialize with bincode for speed
-    let file = fs::File::create(&cache_path)
-        .map_err(|e| format!("Failed to create cache file: {}", e))?;
-    let writer = BufWriter::new(file);
-
-    bincode::serialize_into(writer, &cached)
+    // First serialize to bytes to check size
+    let serialized = bincode::serialize(&cached)
         .map_err(|e| format!("Failed to serialize cache: {}", e))?;
 
-    println!("[Cache] Saved to {:?}", cache_path);
+    // Check if cache is too large
+    if serialized.len() as u64 > MAX_CACHE_SIZE {
+        return Err(format!(
+            "Cache too large ({:.1} MB > {:.0} MB limit), skipping",
+            serialized.len() as f64 / 1_048_576.0,
+            MAX_CACHE_SIZE as f64 / 1_048_576.0
+        ));
+    }
+
+    // Write to file
+    fs::write(&cache_path, &serialized)
+        .map_err(|e| format!("Failed to write cache file: {}", e))?;
+
+    println!("[Cache] Saved to {:?} ({:.1} MB)", cache_path, serialized.len() as f64 / 1_048_576.0);
     Ok(cache_path)
 }
 
@@ -126,6 +138,7 @@ pub fn load_from_cache(scan_path: &str) -> Result<CachedScan, String> {
 }
 
 /// Check if cache exists for a path
+#[allow(dead_code)]
 pub fn has_cache(scan_path: &str) -> bool {
     get_cache_path(scan_path)
         .map(|p| p.exists())
