@@ -152,6 +152,20 @@ function App() {
     setIsScanning(false);
   };
 
+  // Keyboard shortcuts: Cmd+O (macOS) or Ctrl+O (other) to open folder
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+        e.preventDefault();
+        if (!isScanning) {
+          handleOpenFolder();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isScanning]);
+
   const navigateTo = useCallback(
     (node: FileNode) => {
       // Only navigate into directories that have children and are not placeholder nodes
