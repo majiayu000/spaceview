@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -227,14 +227,17 @@ function App() {
     }
   };
 
-  // Filter rects
-  const filteredRects = treemapRects.filter((rect) => {
-    if (filterType && getFileType(rect.node) !== filterType) return false;
-    if (searchText && !rect.node.name.toLowerCase().includes(searchText.toLowerCase())) {
-      return false;
-    }
-    return true;
-  });
+  // Filter rects - memoized to avoid recalculation on every render
+  const filteredRects = useMemo(() => {
+    const lowerSearchText = searchText.toLowerCase();
+    return treemapRects.filter((rect) => {
+      if (filterType && getFileType(rect.node) !== filterType) return false;
+      if (searchText && !rect.node.name.toLowerCase().includes(lowerSearchText)) {
+        return false;
+      }
+      return true;
+    });
+  }, [treemapRects, filterType, searchText]);
 
   return (
     <>
