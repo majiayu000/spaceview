@@ -8,6 +8,7 @@ export interface FileNode {
   extension?: string;
   file_count: number;
   dir_count: number;
+  modified_at?: number;  // Unix timestamp in seconds
 }
 
 export interface ScanProgress {
@@ -40,6 +41,15 @@ export interface CachedScan {
   total_dirs: number;
   total_size: number;
   root: FileNode;
+}
+
+export interface ScanHistoryEntry {
+  scan_path: string;
+  scanned_at: number;
+  total_files: number;
+  total_dirs: number;
+  total_size: number;
+  cache_size_bytes: number;
 }
 
 export interface TreemapRect {
@@ -178,4 +188,33 @@ export function formatSize(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
 
   return `${(bytes / Math.pow(k, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+export function formatDate(timestamp: number): string {
+  const date = new Date(timestamp * 1000);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  // For recent dates, show relative time
+  if (diffDays === 0) {
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+    if (diffHours === 0) {
+      const diffMins = Math.floor(diffMs / (1000 * 60));
+      if (diffMins < 1) return "Just now";
+      return `${diffMins}m ago`;
+    }
+    return `${diffHours}h ago`;
+  }
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return `${diffDays}d ago`;
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
+  if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`;
+
+  // For older dates, show formatted date
+  return date.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }

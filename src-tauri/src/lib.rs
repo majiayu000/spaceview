@@ -1,7 +1,7 @@
 mod cache;
 mod scanner;
 
-use cache::{CacheInfo, CachedScan};
+use cache::{CacheInfo, CachedScan, ScanHistoryEntry};
 use scanner::{FileNode, Scanner, ScannerState};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,6 +101,12 @@ fn delete_cache(path: String) -> Result<(), String> {
 #[tauri::command]
 fn clear_all_caches() -> Result<usize, String> {
     cache::clear_all_caches()
+}
+
+/// Get scan history (all cached scans)
+#[tauri::command]
+fn get_scan_history() -> Vec<ScanHistoryEntry> {
+    cache::get_scan_history()
 }
 
 /// Open folder picker dialog - returns the selected path
@@ -297,6 +303,7 @@ pub fn run() {
             load_from_cache,
             delete_cache,
             clear_all_caches,
+            get_scan_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

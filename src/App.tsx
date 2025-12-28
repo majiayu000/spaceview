@@ -9,12 +9,14 @@ import {
   TreemapRect,
   FileType,
   CachedScan,
+  ScanHistoryEntry,
   FILE_TYPE_COLORS,
   FILE_TYPE_NAMES,
   getFileGradient,
   getFileIcon,
   getFileType,
   formatSize,
+  formatDate,
 } from "./types";
 import { layoutTreemap } from "./treemap";
 import { ThemeSwitcher } from "./ThemeSwitcher";
@@ -159,8 +161,14 @@ function App() {
   const [cacheTime, setCacheTime] = useState<number | null>(null);
   const [currentScanPath, setCurrentScanPath] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
+  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>([]);
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Load scan history on mount
+  useEffect(() => {
+    invoke<ScanHistoryEntry[]>("get_scan_history").then(setScanHistory).catch(console.error);
+  }, []);
 
   const showError = useCallback((message: string, type: 'error' | 'warning' = 'error') => {
     const id = ++errorIdRef.current;
@@ -864,6 +872,30 @@ function App() {
               Open Folder
             </button>
             <div className="welcome-hint">Or press Cmd+O</div>
+
+            {scanHistory.length > 0 && (
+              <div className="scan-history">
+                <h3>Recent Scans</h3>
+                <div className="history-list">
+                  {scanHistory.slice(0, 5).map((entry, index) => (
+                    <button
+                      key={index}
+                      className="history-item"
+                      onClick={() => scanPath(entry.scan_path, false)}
+                    >
+                      <div className="history-path">
+                        <span className="history-icon">&#128193;</span>
+                        {entry.scan_path.split("/").pop() || entry.scan_path}
+                      </div>
+                      <div className="history-meta">
+                        <span className="history-size">{formatSize(entry.total_size)}</span>
+                        <span className="history-time">{formatDate(entry.scanned_at)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1017,6 +1049,12 @@ function App() {
             <span>Size</span>
             <span>{formatSize(hoveredNode.size)}</span>
           </div>
+          {hoveredNode.modified_at && (
+            <div className="tooltip-row">
+              <span>Modified</span>
+              <span>{formatDate(hoveredNode.modified_at)}</span>
+            </div>
+          )}
           {hoveredNode.is_dir && (
             <>
               <div className="tooltip-row">

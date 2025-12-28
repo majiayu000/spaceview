@@ -70,6 +70,8 @@ pub struct FileNode {
     pub extension: Option<String>,
     pub file_count: u64,
     pub dir_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<u64>,  // Unix timestamp in seconds
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +119,7 @@ struct TempNode {
     size: u64,
     is_dir: bool,
     extension: Option<String>,
+    modified_at: Option<u64>,
     children_paths: Vec<PathBuf>,
 }
 
@@ -222,15 +225,18 @@ impl Scanner {
                 // Use file_type() - comes from readdir, no extra syscall
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-                // Get metadata for inode tracking and size
+                // Get metadata for inode tracking, size, and modification time
                 let metadata = entry.metadata();
-                let (file_size, inode_key) = if let Ok(ref meta) = metadata {
+                let (file_size, inode_key, modified_at) = if let Ok(ref meta) = metadata {
                     let dev = meta.dev();
                     let ino = meta.ino();
                     let size = if is_dir { 0 } else { meta.len() };
-                    (size, Some((dev, ino)))
+                    let mtime = meta.modified().ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    (size, Some((dev, ino)), mtime)
                 } else {
-                    (0, None)
+                    (0, None, None)
                 };
 
                 // Check for hard links (same file with multiple paths)
@@ -273,6 +279,7 @@ impl Scanner {
                     size: stored_size,
                     is_dir,
                     extension,
+                    modified_at,
                     children_paths: Vec::new(),
                 });
 
@@ -488,6 +495,7 @@ impl Scanner {
                 extension: node.extension.clone(),
                 file_count: 0,
                 dir_count: 0,
+                modified_at: node.modified_at,
             });
         }
 
@@ -546,6 +554,7 @@ impl Scanner {
                 extension: None,
                 file_count: other_file_count,
                 dir_count: other_dir_count,
+                modified_at: None,
             });
         }
 
@@ -567,6 +576,7 @@ impl Scanner {
             extension: None,
             file_count,
             dir_count,
+            modified_at: node.modified_at,
         })
     }
 }

@@ -230,3 +230,61 @@ pub struct CacheInfo {
     pub cached_at: u64,
     pub cache_size_bytes: u64,
 }
+
+/// Scan history entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanHistoryEntry {
+    pub scan_path: String,
+    pub scanned_at: u64,
+    pub total_files: u64,
+    pub total_dirs: u64,
+    pub total_size: u64,
+    pub cache_size_bytes: u64,
+}
+
+/// Get all cached scans as history entries
+pub fn get_scan_history() -> Vec<ScanHistoryEntry> {
+    let cache_dir = match get_cache_dir() {
+        Some(dir) => dir,
+        None => return vec![],
+    };
+
+    if !cache_dir.exists() {
+        return vec![];
+    }
+
+    let mut entries: Vec<ScanHistoryEntry> = vec![];
+
+    if let Ok(dir_entries) = fs::read_dir(&cache_dir) {
+        for entry in dir_entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "bin").unwrap_or(false) {
+                // Try to read just the header of the cache file
+                if let Ok(file) = fs::File::open(&path) {
+                    let reader = BufReader::new(file);
+                    if let Ok(cached) = bincode::deserialize_from::<_, CachedScan>(reader) {
+                        if cached.version == CACHE_VERSION {
+                            let cache_size = fs::metadata(&path)
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+
+                            entries.push(ScanHistoryEntry {
+                                scan_path: cached.scan_path,
+                                scanned_at: cached.scanned_at,
+                                total_files: cached.total_files,
+                                total_dirs: cached.total_dirs,
+                                total_size: cached.total_size,
+                                cache_size_bytes: cache_size,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by most recent first
+    entries.sort_by(|a, b| b.scanned_at.cmp(&a.scanned_at));
+
+    entries
+}
