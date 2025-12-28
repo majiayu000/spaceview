@@ -21,6 +21,8 @@ import {
 import { layoutTreemap } from "./treemap";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { FileTypeChart } from "./FileTypeChart";
+import { LargeFilesPanel } from "./LargeFilesPanel";
+import { DuplicatesPanel } from "./DuplicatesPanel";
 
 // Memoized container cell component to prevent re-renders
 const TreemapContainerCell = React.memo(function TreemapContainerCell({
@@ -66,10 +68,30 @@ const TreemapContainerCell = React.memo(function TreemapContainerCell({
   );
 });
 
+// Helper function to highlight matching text
+function highlightText(text: string, searchText: string): React.ReactNode {
+  if (!searchText) return text;
+  const lowerText = text.toLowerCase();
+  const lowerSearch = searchText.toLowerCase();
+  const index = lowerText.indexOf(lowerSearch);
+  if (index === -1) return text;
+
+  return (
+    <>
+      {text.slice(0, index)}
+      <mark className="search-highlight">{text.slice(index, index + searchText.length)}</mark>
+      {text.slice(index + searchText.length)}
+    </>
+  );
+}
+
 // Memoized leaf cell component to prevent re-renders
 const TreemapLeafCell = React.memo(function TreemapLeafCell({
   rect,
   isSelected,
+  isSearchMatch,
+  isCurrentSearchMatch,
+  searchText,
   onHover,
   onLeave,
   onNavigate,
@@ -78,6 +100,9 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
 }: {
   rect: TreemapRect;
   isSelected: boolean;
+  isSearchMatch: boolean;
+  isCurrentSearchMatch: boolean;
+  searchText: string;
   onHover: (node: FileNode, e: React.MouseEvent) => void;
   onLeave: () => void;
   onNavigate: (node: FileNode) => void;
@@ -91,9 +116,18 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
     ? parseInt(rect.node.name.match(/\d+/)?.[0] || "0")
     : 0;
 
+  const classNames = [
+    "treemap-cell",
+    `depth-${rect.depth}`,
+    isMoreItems ? "more-items-cell" : "",
+    isSelected ? "selected" : "",
+    isSearchMatch ? "search-match" : "",
+    isCurrentSearchMatch ? "current-search-match" : "",
+  ].filter(Boolean).join(" ");
+
   return (
     <div
-      className={`treemap-cell depth-${rect.depth}${isMoreItems ? " more-items-cell" : ""}${isSelected ? " selected" : ""}`}
+      className={classNames}
       style={{
         left: rect.x,
         top: rect.y,
@@ -118,7 +152,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
             </div>
           )}
           <div className="treemap-cell-name">
-            {isMoreItems ? `+${moreItemsCount} hidden` : rect.node.name}
+            {isMoreItems ? `+${moreItemsCount} hidden` : highlightText(rect.node.name, searchText)}
           </div>
           <div className="treemap-cell-size">
             {isMoreItems ? formatSize(rect.node.size) : formatSize(rect.node.size)}
@@ -160,12 +194,16 @@ function App() {
   const [currentScanPath, setCurrentScanPath] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>([]);
+  const [currentSearchMatchIndex, setCurrentSearchMatchIndex] = useState<number>(-1);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [showBackground, setShowBackground] = useState(true);
   const [bgIndex, setBgIndex] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [showDuplicates, setShowDuplicates] = useState(false);
+  const dragCounter = useRef(0);
 
   // Anime background images
   const backgrounds = [
@@ -176,6 +214,7 @@ function App() {
   ];
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Load scan history on mount
   useEffect(() => {
@@ -218,6 +257,34 @@ function App() {
       unlistenCache.then((fn) => fn());
     };
   }, []);
+
+  // Listen for Tauri file drop events
+  useEffect(() => {
+    const unlistenDrop = listen<{ paths: string[] }>("tauri://drag-drop", async (event) => {
+      if (isScanning) return;
+      const paths = event.payload.paths;
+      if (paths && paths.length > 0) {
+        setIsDragging(false);
+        await scanPath(paths[0], false);
+      }
+    });
+
+    const unlistenDragEnter = listen("tauri://drag-enter", () => {
+      if (!isScanning) {
+        setIsDragging(true);
+      }
+    });
+
+    const unlistenDragLeave = listen("tauri://drag-leave", () => {
+      setIsDragging(false);
+    });
+
+    return () => {
+      unlistenDrop.then((fn) => fn());
+      unlistenDragEnter.then((fn) => fn());
+      unlistenDragLeave.then((fn) => fn());
+    };
+  }, [isScanning]);
 
   // Update treemap layout when current node or container size changes
   useEffect(() => {
@@ -408,6 +475,54 @@ function App() {
     setPan({ x: 0, y: 0 });
   }, []);
 
+  // Drag and drop handlers
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current++;
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    dragCounter.current = 0;
+
+    if (isScanning) return;
+
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      // Get the first dropped item's path
+      const item = files[0];
+      // In Tauri, we need to get the path from the file
+      // The webkitRelativePath or path might not be available directly
+      // We'll use the Tauri file drop event instead
+      const path = (item as File & { path?: string }).path;
+      if (path) {
+        await scanPath(path, false);
+      } else {
+        showError("Unable to get folder path. Please use the Open Folder button instead.", "warning");
+      }
+    }
+  }, [isScanning, showError]);
+
   // Reset zoom/pan when navigating
   useEffect(() => {
     resetZoomPan();
@@ -476,6 +591,32 @@ function App() {
     setContextMenu(null);
   };
 
+  const handleCopyPath = async (path: string) => {
+    try {
+      await invoke("copy_to_clipboard", { text: path });
+    } catch (e) {
+      showError(`Failed to copy path: ${e}`);
+    }
+    setContextMenu(null);
+  };
+
+  const handleOpenInTerminal = async (path: string) => {
+    try {
+      await invoke("open_in_terminal", { path });
+    } catch (e) {
+      showError(`Failed to open in Terminal: ${e}`);
+    }
+    setContextMenu(null);
+  };
+
+  const handlePreviewFile = async (path: string) => {
+    try {
+      await invoke("preview_file", { path });
+    } catch (e) {
+      showError(`Failed to preview file: ${e}`);
+    }
+  };
+
   const handleMoveToTrash = async (path: string) => {
     try {
       await invoke("move_to_trash", { path });
@@ -512,6 +653,44 @@ function App() {
     });
   }, [treemapRects, filterType, searchText, minSizeFilter]);
 
+  // Compute search match indices (indices into filteredRects that match the search text)
+  const searchMatchIndices = useMemo(() => {
+    if (!searchText) return [];
+    const lowerSearchText = searchText.toLowerCase();
+    return filteredRects
+      .map((rect, index) => ({ rect, index }))
+      .filter(({ rect }) => rect.node.name.toLowerCase().includes(lowerSearchText))
+      .map(({ index }) => index);
+  }, [filteredRects, searchText]);
+
+  // Reset search match index when search text changes or matches change
+  useEffect(() => {
+    if (searchMatchIndices.length > 0) {
+      setCurrentSearchMatchIndex(0);
+      // Auto-select first match
+      setSelectedIndex(searchMatchIndices[0]);
+    } else {
+      setCurrentSearchMatchIndex(-1);
+    }
+  }, [searchMatchIndices]);
+
+  // Navigate to next/previous search match
+  const goToNextSearchMatch = useCallback(() => {
+    if (searchMatchIndices.length === 0) return;
+    const nextIndex = (currentSearchMatchIndex + 1) % searchMatchIndices.length;
+    setCurrentSearchMatchIndex(nextIndex);
+    setSelectedIndex(searchMatchIndices[nextIndex]);
+  }, [searchMatchIndices, currentSearchMatchIndex]);
+
+  const goToPrevSearchMatch = useCallback(() => {
+    if (searchMatchIndices.length === 0) return;
+    const prevIndex = currentSearchMatchIndex <= 0
+      ? searchMatchIndices.length - 1
+      : currentSearchMatchIndex - 1;
+    setCurrentSearchMatchIndex(prevIndex);
+    setSelectedIndex(searchMatchIndices[prevIndex]);
+  }, [searchMatchIndices, currentSearchMatchIndex]);
+
   // Jump to largest item
   const jumpToLargest = useCallback(() => {
     if (filteredRects.length > 0) {
@@ -527,6 +706,10 @@ function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Check if typing in an input field
+      const isTyping = document.activeElement?.tagName === 'INPUT' ||
+                       document.activeElement?.tagName === 'TEXTAREA';
+
       // Cmd+O / Ctrl+O to open folder
       if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
         e.preventDefault();
@@ -536,18 +719,56 @@ function App() {
         return;
       }
 
-      // Don't handle navigation keys if scanning or no treemap
-      if (isScanning || filteredRects.length === 0) return;
+      // Cmd+F / Ctrl+F to focus search
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
 
-      // Escape - close menus and deselect
+      // F3 or Cmd+G / Ctrl+G - navigate search results
+      if (e.key === 'F3' || ((e.metaKey || e.ctrlKey) && e.key === 'g')) {
+        e.preventDefault();
+        if (searchText && searchMatchIndices.length > 0) {
+          if (e.shiftKey) {
+            goToPrevSearchMatch();
+          } else {
+            goToNextSearchMatch();
+          }
+        }
+        return;
+      }
+
+      // Escape - close menus, blur search, and deselect
       if (e.key === 'Escape') {
+        if (isTyping) {
+          (document.activeElement as HTMLElement)?.blur();
+        }
         setContextMenu(null);
         setShowFilterMenu(false);
         setSelectedIndex(-1);
         return;
       }
 
-      // Backspace - go back in navigation
+      // Don't handle other navigation keys if typing or scanning
+      if (isTyping || isScanning) return;
+
+      // Don't handle navigation keys if no treemap
+      if (filteredRects.length === 0) return;
+
+      // Cmd+Delete or Cmd+Backspace - delete selected item
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'Delete' || e.key === 'Backspace')) {
+        if (selectedIndex >= 0 && selectedIndex < filteredRects.length) {
+          e.preventDefault();
+          const selectedNode = filteredRects[selectedIndex].node;
+          handleMoveToTrash(selectedNode.path);
+          setSelectedIndex(-1);
+        }
+        return;
+      }
+
+      // Backspace - go back in navigation (without Cmd)
       if (e.key === 'Backspace' && navigationPath.length > 0) {
         e.preventDefault();
         navigateToIndex(navigationPath.length - 2);
@@ -637,7 +858,23 @@ function App() {
   };
 
   return (
-    <>
+    <div
+      className="app-container"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* Drag and Drop Overlay */}
+      {isDragging && (
+        <div className="drop-overlay">
+          <div className="drop-overlay-content">
+            <span className="drop-overlay-icon">📁</span>
+            <span className="drop-overlay-text">Drop folder to scan</span>
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="toolbar" role="toolbar" aria-label="Main toolbar">
         <button
@@ -806,23 +1043,70 @@ function App() {
           </div>
         )}
 
+        {/* Find Duplicates button */}
+        {rootNode && !isScanning && (
+          <button
+            className={`toolbar-btn duplicates-btn${showDuplicates ? " active" : ""}`}
+            onClick={() => setShowDuplicates(!showDuplicates)}
+            title="Find duplicate files"
+          >
+            <span aria-hidden="true">🔍</span> Duplicates
+          </button>
+        )}
+
         <div className="search-box">
           <span aria-hidden="true">&#128269;</span>
           <label htmlFor="file-search" className="visually-hidden">Search files</label>
           <input
+            ref={searchInputRef}
             id="file-search"
             type="text"
-            placeholder="Search files..."
+            placeholder="Search files... (Cmd+F)"
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && searchMatchIndices.length > 0) {
+                e.preventDefault();
+                if (e.shiftKey) {
+                  goToPrevSearchMatch();
+                } else {
+                  goToNextSearchMatch();
+                }
+              }
+            }}
             aria-label="Search files by name"
           />
+          {searchText && searchMatchIndices.length > 0 && (
+            <div className="search-nav">
+              <span className="search-count">
+                {currentSearchMatchIndex + 1}/{searchMatchIndices.length}
+              </span>
+              <button
+                className="search-nav-btn"
+                onClick={goToPrevSearchMatch}
+                title="Previous match (Shift+Enter)"
+                aria-label="Previous search match"
+              >
+                ▲
+              </button>
+              <button
+                className="search-nav-btn"
+                onClick={goToNextSearchMatch}
+                title="Next match (Enter)"
+                aria-label="Next search match"
+              >
+                ▼
+              </button>
+            </div>
+          )}
+          {searchText && searchMatchIndices.length === 0 && (
+            <span className="search-no-results">No results</span>
+          )}
           {searchText && (
             <button
               className="search-clear"
               onClick={() => setSearchText("")}
               aria-label="Clear search"
-              style={{ cursor: "pointer", background: "none", border: "none", color: "inherit" }}
             >
               &#10005;
             </button>
@@ -927,6 +1211,47 @@ function App() {
       {/* File Type Distribution Chart */}
       {rootNode && !isScanning && (
         <FileTypeChart node={currentNode || rootNode} />
+      )}
+
+      {/* Large Files Panel */}
+      {rootNode && !isScanning && (
+        <LargeFilesPanel
+          rootNode={rootNode}
+          onNavigateToFile={(filePath) => {
+            // Find and navigate to the parent directory of the file
+            const parentPath = filePath.substring(0, filePath.lastIndexOf('/'));
+            const parentNode = findNodeByPath(rootNode, parentPath);
+            if (parentNode && parentNode.is_dir) {
+              setNavigationPath([]);
+              setCurrentNode(parentNode);
+              // Build navigation path from root to parent
+              const buildPath = (target: string, node: FileNode, path: FileNode[]): FileNode[] | null => {
+                if (node.path === target) return path;
+                for (const child of node.children) {
+                  if (target.startsWith(child.path)) {
+                    const result = buildPath(target, child, [...path, child]);
+                    if (result) return result;
+                  }
+                }
+                return null;
+              };
+              const navPath = buildPath(parentPath, rootNode, []);
+              if (navPath) {
+                setNavigationPath(navPath);
+                setCurrentNode(parentNode);
+              }
+            }
+          }}
+        />
+      )}
+
+      {/* Duplicates Panel */}
+      {showDuplicates && rootNode && !isScanning && (
+        <DuplicatesPanel
+          scanPath={rootNode.path}
+          onClose={() => setShowDuplicates(false)}
+          onShowInFinder={handleShowInFinder}
+        />
       )}
 
       {/* Main Content */}
@@ -1057,6 +1382,9 @@ function App() {
                     key={rect.id}
                     rect={rect}
                     isSelected={index === selectedIndex}
+                    isSearchMatch={searchMatchIndices.includes(index)}
+                    isCurrentSearchMatch={searchMatchIndices[currentSearchMatchIndex] === index}
+                    searchText={searchText}
                     onHover={handleCellHover}
                     onLeave={handleCellLeave}
                     onNavigate={navigateTo}
@@ -1111,6 +1439,19 @@ function App() {
             onClick={() => handleOpenFile(contextMenu.node.path)}
           >
             <span>&#128194;</span> Open
+          </div>
+          <div className="context-menu-divider" />
+          <div
+            className="context-menu-item"
+            onClick={() => handleCopyPath(contextMenu.node.path)}
+          >
+            <span>&#128203;</span> Copy Path
+          </div>
+          <div
+            className="context-menu-item"
+            onClick={() => handleOpenInTerminal(contextMenu.node.path)}
+          >
+            <span>&#9002;</span> Open in Terminal
           </div>
           <div className="context-menu-divider" />
           <div
@@ -1192,7 +1533,7 @@ function App() {
           ))}
         </div>
       )}
-    </>
+    </div>
   );
 }
 

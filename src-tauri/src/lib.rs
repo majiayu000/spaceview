@@ -1,7 +1,9 @@
 mod cache;
+mod duplicates;
 mod scanner;
 
 use cache::{CacheInfo, CachedScan, ScanHistoryEntry};
+use duplicates::{DuplicateFinder, DuplicateResult};
 use scanner::{FileNode, Scanner, ScannerState};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,12 +13,14 @@ use tauri_plugin_dialog::DialogExt;
 /// Global scanner state
 pub struct AppState {
     scanner_state: Arc<ScannerState>,
+    duplicate_finder: Arc<DuplicateFinder>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             scanner_state: Arc::new(ScannerState::new()),
+            duplicate_finder: Arc::new(DuplicateFinder::new()),
         }
     }
 }
@@ -172,6 +176,72 @@ fn move_to_trash(path: String) -> Result<(), String> {
     trash::delete(&path_buf).map_err(|e| format!("Failed to move to trash: {}", e))
 }
 
+/// Copy path to clipboard using pbcopy on macOS
+#[tauri::command]
+fn copy_to_clipboard(text: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn pbcopy: {}", e))?;
+
+        if let Some(ref mut stdin) = child.stdin {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("Failed to write to pbcopy: {}", e))?;
+        }
+
+        child
+            .wait()
+            .map_err(|e| format!("Failed to wait for pbcopy: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Open path in Terminal
+#[tauri::command]
+fn open_in_terminal(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path_buf = std::path::PathBuf::from(&path);
+        // If it's a file, open the parent directory
+        let dir_path = if path_buf.is_file() {
+            path_buf.parent().map(|p| p.to_path_buf()).unwrap_or(path_buf)
+        } else {
+            path_buf
+        };
+
+        std::process::Command::new("open")
+            .args(["-a", "Terminal", dir_path.to_str().unwrap_or("")])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Preview file using Quick Look (macOS)
+#[tauri::command]
+fn preview_file(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path_buf = std::path::PathBuf::from(&path);
+        if !path_buf.exists() {
+            return Err(format!("Path does not exist: {}", path));
+        }
+
+        // Use qlmanage for Quick Look preview
+        std::process::Command::new("qlmanage")
+            .args(["-p", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open Quick Look: {}", e))?;
+    }
+    Ok(())
+}
+
 /// Get disk list
 #[tauri::command]
 fn get_disks() -> Vec<DiskInfo> {
@@ -284,6 +354,39 @@ fn get_disk_info(path: String) -> Result<DiskSpaceInfo, String> {
     }
 }
 
+/// Find duplicate files in a directory
+#[tauri::command]
+async fn find_duplicates(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    min_size: Option<u64>,
+) -> Result<Option<DuplicateResult>, String> {
+    let path_buf = PathBuf::from(&path);
+
+    if !path_buf.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+
+    if !path_buf.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
+
+    let finder = state.duplicate_finder.clone();
+
+    tokio::task::spawn_blocking(move || {
+        finder.find_duplicates(&path_buf, min_size, &app_handle)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Cancel ongoing duplicate scan
+#[tauri::command]
+fn cancel_duplicate_scan(state: State<'_, AppState>) {
+    state.duplicate_finder.cancel();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -297,6 +400,9 @@ pub fn run() {
             show_in_finder,
             open_file,
             move_to_trash,
+            copy_to_clipboard,
+            open_in_terminal,
+            preview_file,
             get_disks,
             get_disk_info,
             check_cache,
@@ -304,6 +410,8 @@ pub fn run() {
             delete_cache,
             clear_all_caches,
             get_scan_history,
+            find_duplicates,
+            cancel_duplicate_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

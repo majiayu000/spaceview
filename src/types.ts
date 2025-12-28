@@ -52,6 +52,37 @@ export interface ScanHistoryEntry {
   cache_size_bytes: number;
 }
 
+export interface DuplicateFile {
+  path: string;
+  name: string;
+}
+
+export interface DuplicateGroup {
+  hash: string;
+  size: number;
+  files: DuplicateFile[];
+  wasted_bytes: number;
+}
+
+export interface DuplicateResult {
+  groups: DuplicateGroup[];
+  total_duplicates: number;
+  total_wasted_bytes: number;
+  files_scanned: number;
+  files_hashed: number;
+  time_ms: number;
+}
+
+export interface DuplicateProgress {
+  phase: string;  // "scanning" | "grouping" | "hashing" | "complete"
+  scanned_files: number;
+  groups_found: number;
+  files_hashed: number;
+  total_to_hash: number;
+  current_file: string;
+  is_complete: boolean;
+}
+
 export interface TreemapRect {
   id: string;
   node: FileNode;
