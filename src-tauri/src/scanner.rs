@@ -87,9 +87,21 @@ impl ScannerState {
     pub fn new() -> Self {
         Self { is_cancelled: AtomicBool::new(false) }
     }
-    pub fn cancel(&self) { self.is_cancelled.store(true, Ordering::SeqCst); }
-    pub fn is_cancelled(&self) -> bool { self.is_cancelled.load(Ordering::Relaxed) }
-    pub fn reset(&self) { self.is_cancelled.store(false, Ordering::SeqCst); }
+
+    /// Cancel the scan - uses Release ordering to ensure visibility across threads
+    pub fn cancel(&self) {
+        self.is_cancelled.store(true, Ordering::Release);
+    }
+
+    /// Check if scan is cancelled - uses Acquire ordering to synchronize with cancel()
+    pub fn is_cancelled(&self) -> bool {
+        self.is_cancelled.load(Ordering::Acquire)
+    }
+
+    /// Reset cancellation state - uses Release ordering for next scan
+    pub fn reset(&self) {
+        self.is_cancelled.store(false, Ordering::Release);
+    }
 }
 
 impl Default for ScannerState {
