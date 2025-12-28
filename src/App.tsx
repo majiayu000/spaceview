@@ -166,6 +166,16 @@ function App() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const [showBackground, setShowBackground] = useState(true);
+  const [bgIndex, setBgIndex] = useState(0);
+
+  // Anime background images
+  const backgrounds = [
+    "https://w.wallhaven.cc/full/ex/wallhaven-ex9gwo.png",
+    "https://w.wallhaven.cc/full/p9/wallhaven-p9gr22.jpg",
+    "https://w.wallhaven.cc/full/zy/wallhaven-zymgky.jpg",
+    "https://w.wallhaven.cc/full/we/wallhaven-wevx1l.png",
+  ];
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -832,8 +842,36 @@ function App() {
           )}
         </div>
 
+        {/* Background toggle */}
+        <div className="bg-controls">
+          <button
+            className={`toolbar-btn bg-toggle-btn${showBackground ? " active" : ""}`}
+            onClick={() => setShowBackground(!showBackground)}
+            title={showBackground ? "Hide background" : "Show background"}
+          >
+            <span aria-hidden="true">🎨</span>
+          </button>
+          {showBackground && (
+            <button
+              className="toolbar-btn bg-next-btn"
+              onClick={() => setBgIndex((prev) => (prev + 1) % backgrounds.length)}
+              title="Next background"
+            >
+              <span aria-hidden="true">→</span>
+            </button>
+          )}
+        </div>
+
         <ThemeSwitcher />
       </div>
+
+      {/* Anime Background */}
+      {showBackground && (
+        <div
+          className="anime-background"
+          style={{ backgroundImage: `url(${backgrounds[bgIndex]})` }}
+        />
+      )}
 
       {/* Breadcrumb */}
       {rootNode && (
