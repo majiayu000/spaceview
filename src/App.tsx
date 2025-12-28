@@ -542,21 +542,53 @@ function App() {
           </div>
         )}
 
-        {isScanning && progress && (
-          <div className="scanning">
-            <h2>Scanning...</h2>
+        {isScanning && (
+          <div className="scanning" role="status" aria-live="polite">
+            <div className="scanning-spinner" aria-hidden="true">
+              <div className="spinner-ring" />
+            </div>
+            <h2>Scanning Directory</h2>
+            <p className="scanning-subtitle">Analyzing file structure...</p>
+
             <div className="scanning-progress">
-              <div
-                className="scanning-progress-bar"
-                style={{ width: `${Math.min(99, (progress.scanned_files / 10000) * 100)}%` }}
-              />
+              <div className="scanning-progress-bar scanning-progress-indeterminate" />
             </div>
-            <div className="scanning-stats">
-              <span>{progress.scanned_files.toLocaleString()} files</span>
-              <span>{progress.scanned_dirs.toLocaleString()} folders</span>
-              <span>{formatSize(progress.total_size)}</span>
+
+            <div className="scanning-stats-grid">
+              <div className="scanning-stat">
+                <span className="scanning-stat-value">
+                  {(progress?.scanned_files ?? 0).toLocaleString()}
+                </span>
+                <span className="scanning-stat-label">Files</span>
+              </div>
+              <div className="scanning-stat">
+                <span className="scanning-stat-value">
+                  {(progress?.scanned_dirs ?? 0).toLocaleString()}
+                </span>
+                <span className="scanning-stat-label">Folders</span>
+              </div>
+              <div className="scanning-stat">
+                <span className="scanning-stat-value">
+                  {formatSize(progress?.total_size ?? 0)}
+                </span>
+                <span className="scanning-stat-label">Total Size</span>
+              </div>
             </div>
-            <div className="scanning-path">{progress.current_path}</div>
+
+            {progress?.current_path && (
+              <div className="scanning-path">
+                <span className="scanning-path-label">Current:</span>
+                <span className="scanning-path-value">{progress.current_path}</span>
+              </div>
+            )}
+
+            <button
+              className="scanning-cancel-btn"
+              onClick={handleCancelScan}
+              aria-label="Cancel scanning"
+            >
+              Cancel Scan
+            </button>
           </div>
         )}
 
