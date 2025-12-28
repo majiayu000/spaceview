@@ -548,7 +548,13 @@ function App() {
               <div className="spinner-ring" />
             </div>
             <h2>Scanning Directory</h2>
-            <p className="scanning-subtitle">Analyzing file structure...</p>
+            <p className="scanning-subtitle">
+              {progress?.phase === "walking" && "Scanning files..."}
+              {progress?.phase === "relations" && "Building relationships..."}
+              {progress?.phase === "sizes" && "Calculating sizes..."}
+              {progress?.phase === "tree" && "Building visualization..."}
+              {!progress?.phase && "Analyzing file structure..."}
+            </p>
 
             <div className="scanning-progress">
               <div className="scanning-progress-bar scanning-progress-indeterminate" />

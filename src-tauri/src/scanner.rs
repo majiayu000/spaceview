@@ -77,6 +77,7 @@ pub struct ScanProgress {
     pub current_path: String,
     pub total_size: u64,
     pub is_complete: bool,
+    pub phase: String,  // "walking" | "relations" | "sizes" | "tree" | "complete"
 }
 
 pub struct ScannerState {
@@ -160,6 +161,7 @@ impl Scanner {
                         current_path: path,
                         total_size: size,
                         is_complete: false,
+                        phase: "walking".to_string(),
                     });
                     last_emit = std::time::Instant::now();
                 }
@@ -276,6 +278,14 @@ impl Scanner {
         if self.state.is_cancelled() { return None; }
 
         // Phase 2: Build parent-child relationships (parallel with DashMap)
+        let _ = app_handle.emit("scan-progress", ScanProgress {
+            scanned_files: files_count,
+            scanned_dirs: dirs_count,
+            current_path: "Building relationships...".to_string(),
+            total_size: size_total,
+            is_complete: false,
+            phase: "relations".to_string(),
+        });
         let relation_start = Instant::now();
         println!("[Phase 2] Building parent-child relationships...");
         {
@@ -295,6 +305,14 @@ impl Scanner {
         println!("[Phase 2] Relationships built in {:?}", relation_time);
 
         // Phase 3: Calculate sizes bottom-up
+        let _ = app_handle.emit("scan-progress", ScanProgress {
+            scanned_files: files_count,
+            scanned_dirs: dirs_count,
+            current_path: "Calculating sizes...".to_string(),
+            total_size: size_total,
+            is_complete: false,
+            phase: "sizes".to_string(),
+        });
         let size_start = Instant::now();
         println!("[Phase 3] Calculating directory sizes (bottom-up)...");
         self.calc_sizes_bottomup_dashmap(&nodes, root_path);
@@ -302,6 +320,14 @@ impl Scanner {
         println!("[Phase 3] Size calculation completed in {:?}", size_time);
 
         // Phase 4: Build final tree
+        let _ = app_handle.emit("scan-progress", ScanProgress {
+            scanned_files: files_count,
+            scanned_dirs: dirs_count,
+            current_path: "Building tree...".to_string(),
+            total_size: size_total,
+            is_complete: false,
+            phase: "tree".to_string(),
+        });
         let tree_start = Instant::now();
         println!("[Phase 4] Building output tree (depth={}, max_children={})...", MAX_DEPTH, MAX_CHILDREN);
         let tree = self.build_tree_dashmap(&nodes, root_path, 0);
@@ -358,6 +384,7 @@ impl Scanner {
             current_path: String::new(),
             total_size: size_total,
             is_complete: true,
+            phase: "complete".to_string(),
         });
 
         tree

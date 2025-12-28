@@ -16,6 +16,7 @@ export interface ScanProgress {
   current_path: string;
   total_size: number;
   is_complete: boolean;
+  phase: string;  // "walking" | "relations" | "sizes" | "tree" | "complete"
 }
 
 export interface DiskSpaceInfo {
