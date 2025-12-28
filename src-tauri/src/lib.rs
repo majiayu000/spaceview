@@ -97,23 +97,16 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Move file to trash
+/// Move file to trash (using safe trash crate, no shell injection risk)
 #[tauri::command]
 fn move_to_trash(path: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("osascript")
-            .args([
-                "-e",
-                &format!(
-                    "tell application \"Finder\" to delete POSIX file \"{}\"",
-                    path
-                ),
-            ])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+    let path_buf = std::path::PathBuf::from(&path);
+
+    if !path_buf.exists() {
+        return Err(format!("Path does not exist: {}", path));
     }
-    Ok(())
+
+    trash::delete(&path_buf).map_err(|e| format!("Failed to move to trash: {}", e))
 }
 
 /// Get disk list

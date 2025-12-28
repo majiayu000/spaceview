@@ -33,6 +33,7 @@ crossbeam-deque = "0.8" # work-stealing queues
 num_cpus = "1.16"
 parking_lot = "0.12"    # faster mutex/rwlock
 dashmap = "6"           # lock-free concurrent hashmap
+trash = "5"             # safe cross-platform trash operations
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
