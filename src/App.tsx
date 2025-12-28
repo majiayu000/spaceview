@@ -18,6 +18,12 @@ import {
 } from "./types";
 import { layoutTreemap } from "./treemap";
 
+interface ErrorNotification {
+  id: number;
+  message: string;
+  type: 'error' | 'warning';
+}
+
 function App() {
   const [rootNode, setRootNode] = useState<FileNode | null>(null);
   const [currentNode, setCurrentNode] = useState<FileNode | null>(null);
@@ -36,7 +42,22 @@ function App() {
   } | null>(null);
   const [treemapRects, setTreemapRects] = useState<TreemapRect[]>([]);
   const [diskInfo, setDiskInfo] = useState<DiskSpaceInfo | null>(null);
+  const [errors, setErrors] = useState<ErrorNotification[]>([]);
+  const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const showError = useCallback((message: string, type: 'error' | 'warning' = 'error') => {
+    const id = ++errorIdRef.current;
+    setErrors(prev => [...prev, { id, message, type }]);
+    // Auto-dismiss after 5 seconds
+    setTimeout(() => {
+      setErrors(prev => prev.filter(e => e.id !== id));
+    }, 5000);
+  }, []);
+
+  const dismissError = useCallback((id: number) => {
+    setErrors(prev => prev.filter(e => e.id !== id));
+  }, []);
 
   // Listen for scan progress events
   useEffect(() => {
@@ -105,7 +126,7 @@ function App() {
         const info = await invoke<DiskSpaceInfo>("get_disk_info", { path: selectedPath });
         setDiskInfo(info);
       } catch (e) {
-        console.error("Failed to get disk info:", e);
+        showError(`Failed to get disk info: ${e}`, 'warning');
       }
 
       // Then start scanning
@@ -121,7 +142,7 @@ function App() {
       }
       setIsScanning(false);
     } catch (error) {
-      console.error("Scan failed:", error);
+      showError(`Scan failed: ${error}`);
       setIsScanning(false);
     }
   };
@@ -166,30 +187,43 @@ function App() {
   );
 
   const handleShowInFinder = async (path: string) => {
-    await invoke("show_in_finder", { path });
+    try {
+      await invoke("show_in_finder", { path });
+    } catch (e) {
+      showError(`Failed to show in Finder: ${e}`);
+    }
     setContextMenu(null);
   };
 
   const handleOpenFile = async (path: string) => {
-    await invoke("open_file", { path });
+    try {
+      await invoke("open_file", { path });
+    } catch (e) {
+      showError(`Failed to open file: ${e}`);
+    }
     setContextMenu(null);
   };
 
   const handleMoveToTrash = async (path: string) => {
-    await invoke("move_to_trash", { path });
-    setContextMenu(null);
-    // Rescan to update
-    if (rootNode) {
-      setIsScanning(true);
-      const result = await invoke<FileNode | null>("scan_directory", {
-        path: rootNode.path,
-      });
-      if (result) {
-        setRootNode(result);
-        setCurrentNode(result);
-        setNavigationPath([]);
+    try {
+      await invoke("move_to_trash", { path });
+      setContextMenu(null);
+      // Rescan to update
+      if (rootNode) {
+        setIsScanning(true);
+        const result = await invoke<FileNode | null>("scan_directory", {
+          path: rootNode.path,
+        });
+        if (result) {
+          setRootNode(result);
+          setCurrentNode(result);
+          setNavigationPath([]);
+        }
+        setIsScanning(false);
       }
-      setIsScanning(false);
+    } catch (e) {
+      showError(`Failed to move to trash: ${e}`);
+      setContextMenu(null);
     }
   };
 
@@ -534,6 +568,30 @@ function App() {
             />
             {FILE_TYPE_NAMES[getFileType(hoveredNode)]}
           </div>
+        </div>
+      )}
+
+      {/* Error Notifications */}
+      {errors.length > 0 && (
+        <div className="error-notifications" role="alert" aria-live="assertive">
+          {errors.map((error) => (
+            <div
+              key={error.id}
+              className={`error-notification ${error.type}`}
+            >
+              <span className="error-icon">
+                {error.type === 'error' ? '⚠️' : '⚡'}
+              </span>
+              <span className="error-message">{error.message}</span>
+              <button
+                className="error-dismiss"
+                onClick={() => dismissError(error.id)}
+                aria-label="Dismiss notification"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </>
