@@ -162,6 +162,10 @@ function App() {
   const [currentScanPath, setCurrentScanPath] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>([]);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -449,6 +453,45 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isScanning, filteredRects, selectedIndex, navigationPath, navigateTo, navigateToIndex]);
+
+  // Zoom with mouse wheel
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      setZoom(prev => Math.min(Math.max(prev * delta, 0.5), 4));
+    }
+  }, []);
+
+  // Pan with mouse drag
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1 || (e.button === 0 && e.altKey)) { // Middle click or Alt+click
+      e.preventDefault();
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    }
+  }, [pan]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (isPanning) {
+      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+    }
+  }, [isPanning, panStart]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false);
+  }, []);
+
+  // Reset zoom and pan
+  const resetZoomPan = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  // Reset zoom/pan when navigating
+  useEffect(() => {
+    resetZoomPan();
+  }, [currentNode, resetZoomPan]);
 
   // Find a node by path in the tree
   const findNodeByPath = useCallback((root: FileNode | null, path: string): FileNode | null => {
@@ -956,32 +999,53 @@ function App() {
         )}
 
         {rootNode && !isScanning && (
-          <div className="treemap-container" ref={containerRef}>
-            {filteredRects.map((rect, index) => (
-              rect.isContainer ? (
-                <TreemapContainerCell
-                  key={rect.id + "-container"}
-                  rect={rect}
-                  isSelected={index === selectedIndex}
-                  onHover={handleCellHover}
-                  onLeave={handleCellLeave}
-                  onNavigate={navigateTo}
-                  onContextMenu={handleContextMenu}
-                  onSelect={() => setSelectedIndex(index)}
-                />
-              ) : (
-                <TreemapLeafCell
-                  key={rect.id}
-                  rect={rect}
-                  isSelected={index === selectedIndex}
-                  onHover={handleCellHover}
-                  onLeave={handleCellLeave}
-                  onNavigate={navigateTo}
-                  onContextMenu={handleContextMenu}
-                  onSelect={() => setSelectedIndex(index)}
-                />
-              )
-            ))}
+          <div
+            className={`treemap-container${isPanning ? " panning" : ""}`}
+            ref={containerRef}
+            onWheel={handleWheel}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+          >
+            <div
+              className="treemap-transform"
+              style={{
+                transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                transformOrigin: "center center",
+              }}
+            >
+              {filteredRects.map((rect, index) => (
+                rect.isContainer ? (
+                  <TreemapContainerCell
+                    key={rect.id + "-container"}
+                    rect={rect}
+                    isSelected={index === selectedIndex}
+                    onHover={handleCellHover}
+                    onLeave={handleCellLeave}
+                    onNavigate={navigateTo}
+                    onContextMenu={handleContextMenu}
+                    onSelect={() => setSelectedIndex(index)}
+                  />
+                ) : (
+                  <TreemapLeafCell
+                    key={rect.id}
+                    rect={rect}
+                    isSelected={index === selectedIndex}
+                    onHover={handleCellHover}
+                    onLeave={handleCellLeave}
+                    onNavigate={navigateTo}
+                    onContextMenu={handleContextMenu}
+                    onSelect={() => setSelectedIndex(index)}
+                  />
+                )
+              ))}
+            </div>
+            {zoom !== 1 && (
+              <button className="zoom-reset-btn" onClick={resetZoomPan} title="Reset zoom (double-click)">
+                {Math.round(zoom * 100)}%
+              </button>
+            )}
           </div>
         )}
       </div>
