@@ -242,14 +242,23 @@ function App() {
   return (
     <>
       {/* Toolbar */}
-      <div className="toolbar">
-        <button className="toolbar-btn" onClick={handleOpenFolder} disabled={isScanning}>
-          <span>&#128193;</span> Open Folder
+      <div className="toolbar" role="toolbar" aria-label="Main toolbar">
+        <button
+          className="toolbar-btn"
+          onClick={handleOpenFolder}
+          disabled={isScanning}
+          aria-label="Open folder to analyze"
+        >
+          <span aria-hidden="true">&#128193;</span> Open Folder
         </button>
 
         {isScanning && (
-          <button className="toolbar-btn" onClick={handleCancelScan}>
-            <span>&#10005;</span> Cancel
+          <button
+            className="toolbar-btn"
+            onClick={handleCancelScan}
+            aria-label="Cancel current scan"
+          >
+            <span aria-hidden="true">&#10005;</span> Cancel
           </button>
         )}
 
@@ -259,30 +268,38 @@ function App() {
           <button
             className="filter-btn"
             onClick={() => setShowFilterMenu(!showFilterMenu)}
+            aria-haspopup="listbox"
+            aria-expanded={showFilterMenu}
+            aria-label={`Filter by file type: ${filterType ? FILE_TYPE_NAMES[filterType] : 'All types'}`}
           >
             {filterType ? (
               <>
                 <span
                   className="filter-dot"
                   style={{ background: FILE_TYPE_COLORS[filterType] }}
+                  aria-hidden="true"
                 />
                 {FILE_TYPE_NAMES[filterType]}
               </>
             ) : (
               <>
-                <span>&#9662;</span> Filter
+                <span aria-hidden="true">&#9662;</span> Filter
               </>
             )}
           </button>
 
           {showFilterMenu && (
-            <div className="filter-dropdown">
+            <div className="filter-dropdown" role="listbox" aria-label="File type filter">
               <div
                 className="filter-option"
+                role="option"
+                aria-selected={filterType === null}
+                tabIndex={0}
                 onClick={() => {
                   setFilterType(null);
                   setShowFilterMenu(false);
                 }}
+                onKeyDown={(e) => e.key === 'Enter' && (setFilterType(null), setShowFilterMenu(false))}
               >
                 All Types
               </div>
@@ -290,14 +307,19 @@ function App() {
                 <div
                   key={type}
                   className="filter-option"
+                  role="option"
+                  aria-selected={filterType === type}
+                  tabIndex={0}
                   onClick={() => {
                     setFilterType(type);
                     setShowFilterMenu(false);
                   }}
+                  onKeyDown={(e) => e.key === 'Enter' && (setFilterType(type), setShowFilterMenu(false))}
                 >
                   <span
                     className="filter-dot"
                     style={{ background: FILE_TYPE_COLORS[type] }}
+                    aria-hidden="true"
                   />
                   {FILE_TYPE_NAMES[type]}
                 </div>
@@ -307,45 +329,52 @@ function App() {
         </div>
 
         <div className="search-box">
-          <span>&#128269;</span>
+          <span aria-hidden="true">&#128269;</span>
+          <label htmlFor="file-search" className="visually-hidden">Search files</label>
           <input
+            id="file-search"
             type="text"
             placeholder="Search files..."
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
+            aria-label="Search files by name"
           />
           {searchText && (
-            <span
-              style={{ cursor: "pointer" }}
+            <button
+              className="search-clear"
               onClick={() => setSearchText("")}
+              aria-label="Clear search"
+              style={{ cursor: "pointer", background: "none", border: "none", color: "inherit" }}
             >
               &#10005;
-            </span>
+            </button>
           )}
         </div>
       </div>
 
       {/* Breadcrumb */}
       {rootNode && (
-        <div className="breadcrumb">
-          <div
+        <nav className="breadcrumb" aria-label="Folder navigation">
+          <button
             className={`breadcrumb-item ${navigationPath.length === 0 ? "active" : ""}`}
             onClick={() => navigateToIndex(-1)}
+            aria-current={navigationPath.length === 0 ? "location" : undefined}
           >
-            <span>&#128193;</span> {rootNode.name}
-          </div>
+            <span aria-hidden="true">&#128193;</span> {rootNode.name}
+          </button>
           {navigationPath.map((node, index) => (
             <span key={node.id}>
-              <span className="breadcrumb-separator">&#8250;</span>
-              <div
+              <span className="breadcrumb-separator" aria-hidden="true">&#8250;</span>
+              <button
                 className={`breadcrumb-item ${index === navigationPath.length - 1 ? "active" : ""}`}
                 onClick={() => navigateToIndex(index)}
+                aria-current={index === navigationPath.length - 1 ? "location" : undefined}
               >
-                <span>&#128193;</span> {node.name}
-              </div>
+                <span aria-hidden="true">&#128193;</span> {node.name}
+              </button>
             </span>
           ))}
-        </div>
+        </nav>
       )}
 
       {/* Disk Overview Bar */}
