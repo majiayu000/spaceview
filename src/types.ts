@@ -26,6 +26,22 @@ export interface DiskSpaceInfo {
   mount_point: string;
 }
 
+export interface CacheInfo {
+  cache_path: string;
+  cached_at: number;
+  cache_size_bytes: number;
+}
+
+export interface CachedScan {
+  version: number;
+  scan_path: string;
+  scanned_at: number;
+  total_files: number;
+  total_dirs: number;
+  total_size: number;
+  root: FileNode;
+}
+
 export interface TreemapRect {
   id: string;
   node: FileNode;

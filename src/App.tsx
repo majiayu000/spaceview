@@ -8,15 +8,16 @@ import {
   DiskSpaceInfo,
   TreemapRect,
   FileType,
+  CachedScan,
   FILE_TYPE_COLORS,
   FILE_TYPE_NAMES,
-  FILE_TYPE_ICONS,
   getFileGradient,
   getFileIcon,
   getFileType,
   formatSize,
 } from "./types";
 import { layoutTreemap } from "./treemap";
+import { ThemeSwitcher } from "./ThemeSwitcher";
 
 // Memoized container cell component to prevent re-renders
 const TreemapContainerCell = React.memo(function TreemapContainerCell({
@@ -131,6 +132,9 @@ function App() {
   const [treemapRects, setTreemapRects] = useState<TreemapRect[]>([]);
   const [diskInfo, setDiskInfo] = useState<DiskSpaceInfo | null>(null);
   const [errors, setErrors] = useState<ErrorNotification[]>([]);
+  const [isFromCache, setIsFromCache] = useState(false);
+  const [cacheTime, setCacheTime] = useState<number | null>(null);
+  const [currentScanPath, setCurrentScanPath] = useState<string | null>(null);
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -149,15 +153,25 @@ function App() {
 
   // Listen for scan progress events
   useEffect(() => {
-    const unlisten = listen<ScanProgress>("scan-progress", (event) => {
+    const unlistenProgress = listen<ScanProgress>("scan-progress", (event) => {
       setProgress(event.payload);
       if (event.payload.is_complete) {
         setIsScanning(false);
+        setIsFromCache(false);
       }
     });
 
+    // Listen for cache-loaded events
+    const unlistenCache = listen<CachedScan>("scan-from-cache", (event) => {
+      console.log("[Cache] Loaded from cache:", event.payload.scanned_at);
+      setIsFromCache(true);
+      setCacheTime(event.payload.scanned_at);
+      setIsScanning(false);
+    });
+
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenProgress.then((fn) => fn());
+      unlistenCache.then((fn) => fn());
     };
   }, []);
 
@@ -209,19 +223,31 @@ function App() {
 
       if (!selectedPath) return;
 
+      await scanPath(selectedPath, false);
+    } catch (error) {
+      showError(`Scan failed: ${error}`);
+      setIsScanning(false);
+    }
+  };
+
+  const scanPath = async (path: string, forceRescan = false) => {
+    try {
+      setCurrentScanPath(path);
+
       // Fetch disk info for the selected path
       try {
-        const info = await invoke<DiskSpaceInfo>("get_disk_info", { path: selectedPath });
+        const info = await invoke<DiskSpaceInfo>("get_disk_info", { path });
         setDiskInfo(info);
       } catch (e) {
         showError(`Failed to get disk info: ${e}`, 'warning');
       }
 
-      // Then start scanning
+      // Start scanning (use_cache: false to force rescan)
       setIsScanning(true);
       setProgress(null);
       const result = await invoke<FileNode | null>("scan_directory", {
-        path: selectedPath,
+        path,
+        use_cache: !forceRescan,
       });
       if (result) {
         setRootNode(result);
@@ -232,6 +258,14 @@ function App() {
     } catch (error) {
       showError(`Scan failed: ${error}`);
       setIsScanning(false);
+    }
+  };
+
+  const handleRefreshScan = async () => {
+    if (currentScanPath) {
+      setIsFromCache(false);
+      setCacheTime(null);
+      await scanPath(currentScanPath, true);
     }
   };
 
@@ -351,6 +385,20 @@ function App() {
     setHoveredNode(null);
   }, []);
 
+  // Format cache time as relative string
+  const formatCacheTime = (timestamp: number): string => {
+    const now = Math.floor(Date.now() / 1000);
+    const diff = now - timestamp;
+
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString();
+  };
+
   return (
     <>
       {/* Toolbar */}
@@ -372,6 +420,26 @@ function App() {
           >
             <span aria-hidden="true">&#10005;</span> Cancel
           </button>
+        )}
+
+        {rootNode && !isScanning && (
+          <button
+            className="toolbar-btn"
+            onClick={handleRefreshScan}
+            aria-label="Refresh scan (ignore cache)"
+            title="Force rescan without using cache"
+          >
+            <span aria-hidden="true">&#x21bb;</span> Refresh
+          </button>
+        )}
+
+        {isFromCache && cacheTime && (
+          <div className="cache-indicator" title="Data loaded from cache">
+            <span className="cache-icon">⚡</span>
+            <span className="cache-text">
+              Cached {formatCacheTime(cacheTime)}
+            </span>
+          </div>
         )}
 
         <div className="toolbar-divider" />
@@ -462,6 +530,8 @@ function App() {
             </button>
           )}
         </div>
+
+        <ThemeSwitcher />
       </div>
 
       {/* Breadcrumb */}

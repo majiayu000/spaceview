@@ -1,9 +1,11 @@
+mod cache;
 mod scanner;
 
+use cache::{CacheInfo, CachedScan};
 use scanner::{FileNode, Scanner, ScannerState};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
 /// Global scanner state
@@ -19,12 +21,13 @@ impl Default for AppState {
     }
 }
 
-/// Scan a specific directory
+/// Scan a specific directory (with optional caching)
 #[tauri::command]
 async fn scan_directory(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     path: String,
+    use_cache: Option<bool>,
 ) -> Result<Option<FileNode>, String> {
     let path_buf = PathBuf::from(&path);
 
@@ -36,14 +39,68 @@ async fn scan_directory(
         return Err(format!("Path is not a directory: {}", path));
     }
 
+    // Try to load from cache first if use_cache is true (default)
+    let should_use_cache = use_cache.unwrap_or(true);
+    if should_use_cache {
+        if let Ok(cached) = cache::load_from_cache(&path) {
+            println!("[Scan] Using cached result for {}", path);
+            // Emit cache-loaded event
+            let _ = app_handle.emit("scan-from-cache", &cached);
+            return Ok(Some(cached.root));
+        }
+    }
+
     let scanner = Scanner::new(state.scanner_state.clone());
+    let path_for_cache = path.clone();
+    let app_for_cache = app_handle.clone();
 
     // Run scanning in a blocking task to not block the async runtime
     let result = tokio::task::spawn_blocking(move || scanner.scan(&path_buf, &app_handle))
         .await
         .map_err(|e| e.to_string())?;
 
+    // Save to cache after successful scan
+    if let Some(ref root) = result {
+        let root_clone = root.clone();
+        tokio::task::spawn_blocking(move || {
+            match cache::save_to_cache(&path_for_cache, &root_clone) {
+                Ok(cache_path) => {
+                    let _ = app_for_cache.emit("cache-saved", cache_path.to_string_lossy().to_string());
+                }
+                Err(e) => {
+                    eprintln!("[Cache] Failed to save: {}", e);
+                }
+            }
+        });
+    }
+
     Ok(result)
+}
+
+/// Check if cache exists for a path
+#[tauri::command]
+fn check_cache(path: String) -> Option<CacheInfo> {
+    cache::get_cache_info(&path)
+}
+
+/// Load scan results from cache only (don't scan)
+#[tauri::command]
+async fn load_from_cache(path: String) -> Result<CachedScan, String> {
+    tokio::task::spawn_blocking(move || cache::load_from_cache(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Delete cache for a specific path
+#[tauri::command]
+fn delete_cache(path: String) -> Result<(), String> {
+    cache::delete_cache(&path)
+}
+
+/// Clear all caches
+#[tauri::command]
+fn clear_all_caches() -> Result<usize, String> {
+    cache::clear_all_caches()
 }
 
 /// Open folder picker dialog - returns the selected path
@@ -236,6 +293,10 @@ pub fn run() {
             move_to_trash,
             get_disks,
             get_disk_info,
+            check_cache,
+            load_from_cache,
+            delete_cache,
+            clear_all_caches,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

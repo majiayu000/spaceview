@@ -8,9 +8,10 @@
 //! 5. Bottom-up size calculation with iterative post-order
 
 use crossbeam_channel::bounded;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use ignore::{WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -144,6 +145,10 @@ impl Scanner {
         let nodes: Arc<DashMap<PathBuf, TempNode>> =
             Arc::new(DashMap::with_capacity(100_000));
 
+        // Track seen inodes to avoid counting hard links multiple times
+        // Key: (device_id, inode) - uniquely identifies a file on disk
+        let seen_inodes: Arc<DashSet<(u64, u64)>> = Arc::new(DashSet::new());
+
         // Progress channel for UI updates
         let (progress_tx, progress_rx) = bounded::<(u64, u64, u64, String)>(100);
 
@@ -189,6 +194,7 @@ impl Scanner {
         let size_clone = total_size.clone();
         let cancel_clone = self.state.clone();
         let progress_tx_clone = progress_tx.clone();
+        let seen_inodes_clone = seen_inodes.clone();
 
         // Parallel walk with work-stealing + lock-free DashMap
         walker.run(|| {
@@ -198,6 +204,7 @@ impl Scanner {
             let size = size_clone.clone();
             let cancel = cancel_clone.clone();
             let tx = progress_tx_clone.clone();
+            let seen = seen_inodes_clone.clone();
             let mut counter: u64 = 0;
 
             Box::new(move |entry| {
@@ -213,18 +220,39 @@ impl Scanner {
                 let path = entry.path().to_path_buf();
                 // Use file_type() - comes from readdir, no extra syscall
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                // Only call metadata() for files (need size)
-                let file_size = if is_dir {
-                    0
+
+                // Get metadata for inode tracking and size
+                let metadata = entry.metadata();
+                let (file_size, inode_key) = if let Ok(ref meta) = metadata {
+                    let dev = meta.dev();
+                    let ino = meta.ino();
+                    let size = if is_dir { 0 } else { meta.len() };
+                    (size, Some((dev, ino)))
                 } else {
-                    entry.metadata().map(|m| m.len()).unwrap_or(0)
+                    (0, None)
+                };
+
+                // Check for hard links (same file with multiple paths)
+                // Only count size for files, and only if we haven't seen this inode before
+                let is_duplicate = if let Some(key) = inode_key {
+                    if !is_dir {
+                        // For files: check if we've seen this inode before
+                        !seen.insert(key) // returns false if already present
+                    } else {
+                        false // Don't dedupe directories
+                    }
+                } else {
+                    false
                 };
 
                 if is_dir {
                     dirs.fetch_add(1, Ordering::Relaxed);
                 } else {
                     files.fetch_add(1, Ordering::Relaxed);
-                    size.fetch_add(file_size, Ordering::Relaxed);
+                    // Only add size if this is NOT a duplicate hard link
+                    if !is_duplicate {
+                        size.fetch_add(file_size, Ordering::Relaxed);
+                    }
                 }
 
                 let name = path.file_name()
@@ -235,10 +263,13 @@ impl Scanner {
                     path.extension().map(|s| s.to_string_lossy().to_string().to_lowercase())
                 } else { None };
 
+                // For duplicate hard links, store 0 size to avoid double-counting in tree
+                let stored_size = if is_duplicate { 0 } else { file_size };
+
                 // DashMap insert is lock-free!
                 nodes.insert(path.clone(), TempNode {
                     name,
-                    size: file_size,
+                    size: stored_size,
                     is_dir,
                     extension,
                     children_paths: Vec::new(),
@@ -267,13 +298,19 @@ impl Scanner {
         let dirs_count = scanned_dirs.load(Ordering::Relaxed);
         let size_total = total_size.load(Ordering::Relaxed);
         let nodes_count = nodes.len();
+        let unique_inodes = seen_inodes.len();
+        let hard_link_duplicates = files_count.saturating_sub(unique_inodes as u64);
 
         println!("[Phase 1] Walk completed in {:?}", walk_time);
         println!("          Files: {}, Dirs: {}, Total: {}",
             files_count, dirs_count, nodes_count);
+        println!("          Unique file inodes: {}", unique_inodes);
+        if hard_link_duplicates > 0 {
+            println!("          Hard link duplicates: {} (size not counted twice)", hard_link_duplicates);
+        }
         println!("          Speed: {:.0} files/sec",
             files_count as f64 / walk_time.as_secs_f64());
-        println!("          Size: {:.2} GB", size_total as f64 / 1_073_741_824.0);
+        println!("          Size: {:.2} GB (deduplicated)", size_total as f64 / 1_073_741_824.0);
 
         if self.state.is_cancelled() { return None; }
 
