@@ -366,94 +366,6 @@ function App() {
     URL.revokeObjectURL(url);
   }, [rootNode]);
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Cmd+O / Ctrl+O to open folder
-      if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
-        e.preventDefault();
-        if (!isScanning) {
-          handleOpenFolder();
-        }
-        return;
-      }
-
-      // Don't handle navigation keys if scanning or no treemap
-      if (isScanning || filteredRects.length === 0) return;
-
-      // Escape - close menus and deselect
-      if (e.key === 'Escape') {
-        setContextMenu(null);
-        setShowFilterMenu(false);
-        setSelectedIndex(-1);
-        return;
-      }
-
-      // Backspace - go back in navigation
-      if (e.key === 'Backspace' && navigationPath.length > 0) {
-        e.preventDefault();
-        navigateToIndex(navigationPath.length - 2);
-        setSelectedIndex(-1);
-        return;
-      }
-
-      // Enter - navigate into selected item
-      if (e.key === 'Enter' && selectedIndex >= 0 && selectedIndex < filteredRects.length) {
-        e.preventDefault();
-        navigateTo(filteredRects[selectedIndex].node);
-        setSelectedIndex(-1);
-        return;
-      }
-
-      // Arrow keys - navigate between cells
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        e.preventDefault();
-
-        if (selectedIndex < 0) {
-          // No selection, select the largest (first) item
-          setSelectedIndex(0);
-          return;
-        }
-
-        const currentRect = filteredRects[selectedIndex];
-        const cx = currentRect.x + currentRect.width / 2;
-        const cy = currentRect.y + currentRect.height / 2;
-
-        let bestIndex = selectedIndex;
-        let bestDistance = Infinity;
-
-        filteredRects.forEach((rect, i) => {
-          if (i === selectedIndex) return;
-
-          const rx = rect.x + rect.width / 2;
-          const ry = rect.y + rect.height / 2;
-          const dx = rx - cx;
-          const dy = ry - cy;
-
-          // Check direction
-          let isValidDirection = false;
-          if (e.key === 'ArrowUp' && dy < -10) isValidDirection = true;
-          if (e.key === 'ArrowDown' && dy > 10) isValidDirection = true;
-          if (e.key === 'ArrowLeft' && dx < -10) isValidDirection = true;
-          if (e.key === 'ArrowRight' && dx > 10) isValidDirection = true;
-
-          if (isValidDirection) {
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            if (distance < bestDistance) {
-              bestDistance = distance;
-              bestIndex = i;
-            }
-          }
-        });
-
-        setSelectedIndex(bestIndex);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isScanning, filteredRects, selectedIndex, navigationPath, navigateTo, navigateToIndex]);
-
   // Zoom with mouse wheel
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
@@ -614,6 +526,94 @@ function App() {
       setSelectedIndex(largestIdx);
     }
   }, [filteredRects]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+O / Ctrl+O to open folder
+      if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+        e.preventDefault();
+        if (!isScanning) {
+          handleOpenFolder();
+        }
+        return;
+      }
+
+      // Don't handle navigation keys if scanning or no treemap
+      if (isScanning || filteredRects.length === 0) return;
+
+      // Escape - close menus and deselect
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        setShowFilterMenu(false);
+        setSelectedIndex(-1);
+        return;
+      }
+
+      // Backspace - go back in navigation
+      if (e.key === 'Backspace' && navigationPath.length > 0) {
+        e.preventDefault();
+        navigateToIndex(navigationPath.length - 2);
+        setSelectedIndex(-1);
+        return;
+      }
+
+      // Enter - navigate into selected item
+      if (e.key === 'Enter' && selectedIndex >= 0 && selectedIndex < filteredRects.length) {
+        e.preventDefault();
+        navigateTo(filteredRects[selectedIndex].node);
+        setSelectedIndex(-1);
+        return;
+      }
+
+      // Arrow keys - navigate between cells
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+
+        if (selectedIndex < 0) {
+          // No selection, select the largest (first) item
+          setSelectedIndex(0);
+          return;
+        }
+
+        const currentRect = filteredRects[selectedIndex];
+        const cx = currentRect.x + currentRect.width / 2;
+        const cy = currentRect.y + currentRect.height / 2;
+
+        let bestIndex = selectedIndex;
+        let bestDistance = Infinity;
+
+        filteredRects.forEach((rect, i) => {
+          if (i === selectedIndex) return;
+
+          const rx = rect.x + rect.width / 2;
+          const ry = rect.y + rect.height / 2;
+          const dx = rx - cx;
+          const dy = ry - cy;
+
+          // Check direction
+          let isValidDirection = false;
+          if (e.key === 'ArrowUp' && dy < -10) isValidDirection = true;
+          if (e.key === 'ArrowDown' && dy > 10) isValidDirection = true;
+          if (e.key === 'ArrowLeft' && dx < -10) isValidDirection = true;
+          if (e.key === 'ArrowRight' && dx > 10) isValidDirection = true;
+
+          if (isValidDirection) {
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestIndex = i;
+            }
+          }
+        });
+
+        setSelectedIndex(bestIndex);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isScanning, filteredRects, selectedIndex, navigationPath, navigateTo, navigateToIndex]);
 
   // Stable callbacks for memoized treemap cells
   const handleCellHover = useCallback((node: FileNode, e: React.MouseEvent) => {
