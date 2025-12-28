@@ -18,6 +18,7 @@ import {
 } from "./types";
 import { layoutTreemap } from "./treemap";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { FileTypeChart } from "./FileTypeChart";
 
 // Memoized container cell component to prevent re-renders
 const TreemapContainerCell = React.memo(function TreemapContainerCell({
@@ -296,6 +297,62 @@ function App() {
     await invoke("cancel_scan");
     setIsScanning(false);
   };
+
+  // Export scan results
+  const exportAsJSON = useCallback(() => {
+    if (!rootNode) return;
+
+    const data = {
+      scanPath: rootNode.path,
+      exportedAt: new Date().toISOString(),
+      totalSize: rootNode.size,
+      totalFiles: rootNode.file_count,
+      totalDirs: rootNode.dir_count,
+      tree: rootNode,
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `spaceview-export-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [rootNode]);
+
+  const exportAsCSV = useCallback(() => {
+    if (!rootNode) return;
+
+    const rows: string[] = ["Path,Name,Type,Size (bytes),Size (human),Is Directory,File Count,Dir Count"];
+
+    const collectRows = (node: FileNode, depth = 0) => {
+      const type = getFileType(node);
+      rows.push([
+        `"${node.path.replace(/"/g, '""')}"`,
+        `"${node.name.replace(/"/g, '""')}"`,
+        type,
+        node.size.toString(),
+        formatSize(node.size),
+        node.is_dir ? "Yes" : "No",
+        node.file_count.toString(),
+        node.dir_count.toString(),
+      ].join(","));
+
+      if (depth < 5) { // Limit depth for CSV export
+        node.children.forEach(child => collectRows(child, depth + 1));
+      }
+    };
+
+    collectRows(rootNode);
+
+    const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `spaceview-export-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [rootNode]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -681,6 +738,26 @@ function App() {
           </button>
         )}
 
+        {/* Export buttons */}
+        {rootNode && !isScanning && (
+          <div className="export-buttons">
+            <button
+              className="toolbar-btn export-btn"
+              onClick={exportAsJSON}
+              title="Export scan results as JSON"
+            >
+              <span aria-hidden="true">📥</span> JSON
+            </button>
+            <button
+              className="toolbar-btn export-btn"
+              onClick={exportAsCSV}
+              title="Export scan results as CSV"
+            >
+              <span aria-hidden="true">📊</span> CSV
+            </button>
+          </div>
+        )}
+
         <div className="search-box">
           <span aria-hidden="true">&#128269;</span>
           <label htmlFor="file-search" className="visually-hidden">Search files</label>
@@ -769,6 +846,11 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* File Type Distribution Chart */}
+      {rootNode && !isScanning && (
+        <FileTypeChart node={currentNode || rootNode} />
       )}
 
       {/* Main Content */}

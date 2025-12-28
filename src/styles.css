@@ -1270,3 +1270,76 @@ button.breadcrumb-item {
 .jump-largest-btn:hover {
   background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%) !important;
 }
+
+/* File Type Distribution Chart */
+.file-type-chart {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.chart-pie {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  flex: 1;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  min-width: 60px;
+}
+
+.legend-size {
+  color: var(--text-secondary);
+  min-width: 55px;
+  text-align: right;
+}
+
+.legend-percent {
+  color: var(--text-secondary);
+  font-size: 11px;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Export buttons */
+.export-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.export-btn {
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+}
+
+.export-btn:hover {
+  background: var(--accent) !important;
+}
