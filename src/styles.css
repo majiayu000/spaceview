@@ -967,3 +967,306 @@ button.breadcrumb-item {
   font-weight: 500;
   white-space: nowrap;
 }
+
+/* ==================== Enhanced Animations ==================== */
+
+/* Treemap entrance animation */
+@keyframes cellFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.treemap-container {
+  animation: containerFadeIn 0.3s ease-out;
+}
+
+@keyframes containerFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Staggered cell animations */
+.treemap-cell,
+.treemap-container-cell {
+  animation: cellFadeIn 0.25s ease-out backwards;
+}
+
+/* Enhanced hover glow effect */
+.treemap-cell:hover {
+  box-shadow:
+    0 0 20px rgba(255, 255, 255, 0.2),
+    0 8px 24px rgba(0, 0, 0, 0.4),
+    0 2px 8px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.treemap-container-cell:hover {
+  box-shadow:
+    0 0 15px rgba(59, 130, 246, 0.3),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Tooltip animation */
+.tooltip {
+  animation: tooltipFadeIn 0.15s ease-out;
+}
+
+@keyframes tooltipFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Context menu animation */
+.context-menu {
+  animation: contextMenuFadeIn 0.15s ease-out;
+  transform-origin: top left;
+}
+
+@keyframes contextMenuFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.context-menu-item {
+  transition: all 0.1s ease;
+}
+
+.context-menu-item:hover {
+  transform: translateX(4px);
+}
+
+.context-menu-item.danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+/* Breadcrumb animation */
+.breadcrumb-item {
+  transition: all 0.15s ease;
+}
+
+.breadcrumb-item:hover {
+  transform: translateY(-1px);
+}
+
+/* Welcome screen animations */
+.welcome {
+  animation: welcomeFadeIn 0.5s ease-out;
+}
+
+@keyframes welcomeFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.welcome-icon {
+  animation: welcomeIconPulse 2s ease-in-out infinite;
+}
+
+@keyframes welcomeIconPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.3;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.4;
+  }
+}
+
+/* Scanning animation enhancements */
+.scanning {
+  animation: scanningFadeIn 0.3s ease-out;
+}
+
+@keyframes scanningFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.scanning-stat-value {
+  transition: all 0.2s ease;
+}
+
+/* Filter dropdown animation */
+.filter-dropdown {
+  animation: dropdownFade 0.15s ease-out;
+}
+
+/* Button press effect */
+.toolbar-btn:active,
+.filter-btn:active,
+.welcome-btn:active {
+  transform: scale(0.97);
+}
+
+/* Status bar transition */
+.status-bar {
+  transition: all 0.2s ease;
+}
+
+/* Disk overview bar animation */
+.disk-overview-used,
+.disk-overview-scanned {
+  transition: width 0.5s ease-out;
+}
+
+/* Search box focus animation */
+.search-box {
+  transition: all 0.2s ease;
+}
+
+.search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+}
+
+/* More items cell special style */
+.treemap-cell[data-more-items="true"] {
+  cursor: pointer;
+  border-style: dashed;
+}
+
+.treemap-cell[data-more-items="true"]:hover {
+  border-style: solid;
+  background: rgba(107, 114, 128, 0.3) !important;
+}
+
+/* More items cell - special expandable style */
+.more-items-cell {
+  border: 2px dashed rgba(255, 255, 255, 0.4) !important;
+  cursor: pointer !important;
+}
+
+.more-items-cell:hover {
+  border-style: solid !important;
+  border-color: rgba(255, 255, 255, 0.8) !important;
+  background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%) !important;
+}
+
+.more-items-cell .treemap-cell-name {
+  font-style: italic;
+  opacity: 0.9;
+}
+
+.more-items-cell .treemap-cell-size {
+  font-weight: 400;
+}
+
+/* Selected cell style (keyboard navigation) */
+.treemap-cell.selected,
+.treemap-container-cell.selected {
+  z-index: 20 !important;
+  outline: 3px solid #fbbf24 !important;
+  outline-offset: -1px;
+  box-shadow:
+    0 0 0 3px rgba(251, 191, 36, 0.4),
+    0 0 20px rgba(251, 191, 36, 0.3),
+    0 8px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+.treemap-container-cell.selected {
+  border-color: #fbbf24 !important;
+}
+
+/* Keyboard hint in status bar */
+.keyboard-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: auto;
+}
+
+.keyboard-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: inherit;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+}
+
+/* Quick size filter buttons */
+.size-filters {
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+}
+
+.size-filter-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.size-filter-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.size-filter-btn.active {
+  background: var(--accent);
+  color: white;
+}
+
+.size-filter-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Jump to largest button */
+.jump-largest-btn {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%) !important;
+}
+
+.jump-largest-btn:hover {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%) !important;
+}

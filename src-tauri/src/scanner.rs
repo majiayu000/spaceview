@@ -54,9 +54,9 @@ fn get_memory_usage() -> u64 {
     0
 }
 
-const MAX_CHILDREN: usize = 50;   // Limit children per directory for performance
-const MAX_DEPTH: usize = 12;      // Limit tree depth to prevent memory issues
-const MAX_TOTAL_NODES: usize = 50_000;  // Absolute limit on total nodes in tree
+const MAX_CHILDREN: usize = 200;  // Children per directory before grouping
+const MAX_DEPTH: usize = 15;      // Maximum tree depth
+const MAX_TOTAL_NODES: usize = 100_000;  // Absolute limit on total nodes in tree
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {

@@ -22,20 +22,24 @@ import { ThemeSwitcher } from "./ThemeSwitcher";
 // Memoized container cell component to prevent re-renders
 const TreemapContainerCell = React.memo(function TreemapContainerCell({
   rect,
+  isSelected,
   onHover,
   onLeave,
   onNavigate,
   onContextMenu,
+  onSelect,
 }: {
   rect: TreemapRect;
+  isSelected: boolean;
   onHover: (node: FileNode, e: React.MouseEvent) => void;
   onLeave: () => void;
   onNavigate: (node: FileNode) => void;
   onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
+  onSelect: () => void;
 }) {
   return (
     <div
-      className={`treemap-container-cell depth-${rect.depth}`}
+      className={`treemap-container-cell depth-${rect.depth}${isSelected ? " selected" : ""}`}
       style={{
         left: rect.x,
         top: rect.y,
@@ -45,6 +49,7 @@ const TreemapContainerCell = React.memo(function TreemapContainerCell({
       onMouseEnter={(e) => onHover(rect.node, e)}
       onMouseMove={(e) => onHover(rect.node, e)}
       onMouseLeave={onLeave}
+      onClick={onSelect}
       onDoubleClick={() => onNavigate(rect.node)}
       onContextMenu={(e) => onContextMenu(e, rect.node)}
     >
@@ -61,46 +66,62 @@ const TreemapContainerCell = React.memo(function TreemapContainerCell({
 // Memoized leaf cell component to prevent re-renders
 const TreemapLeafCell = React.memo(function TreemapLeafCell({
   rect,
+  isSelected,
   onHover,
   onLeave,
   onNavigate,
   onContextMenu,
+  onSelect,
 }: {
   rect: TreemapRect;
+  isSelected: boolean;
   onHover: (node: FileNode, e: React.MouseEvent) => void;
   onLeave: () => void;
   onNavigate: (node: FileNode) => void;
   onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
+  onSelect: () => void;
 }) {
+  const isMoreItems = rect.node.name.startsWith("<") && rect.node.name.includes("more items");
+
+  const handleClick = () => {
+    onSelect();
+    if (isMoreItems) {
+      onNavigate(rect.node);
+    }
+  };
+
   return (
     <div
-      className={`treemap-cell depth-${rect.depth}`}
+      className={`treemap-cell depth-${rect.depth}${isMoreItems ? " more-items-cell" : ""}${isSelected ? " selected" : ""}`}
       style={{
         left: rect.x,
         top: rect.y,
         width: rect.width,
         height: rect.height,
-        background: getFileGradient(rect.node),
+        background: isMoreItems
+          ? "linear-gradient(135deg, #4b5563 0%, #374151 100%)"
+          : getFileGradient(rect.node),
       }}
       onMouseEnter={(e) => onHover(rect.node, e)}
       onMouseMove={(e) => onHover(rect.node, e)}
       onMouseLeave={onLeave}
-      onDoubleClick={() => onNavigate(rect.node)}
+      onClick={handleClick}
+      onDoubleClick={isMoreItems ? undefined : () => onNavigate(rect.node)}
       onContextMenu={(e) => onContextMenu(e, rect.node)}
     >
       {rect.width > 50 && rect.height > 35 && (
         <>
           {rect.height > 60 && (
             <div className="treemap-cell-icon">
-              {getFileIcon(rect.node)}
+              {isMoreItems ? "📂" : getFileIcon(rect.node)}
             </div>
           )}
-          <div className="treemap-cell-name">{rect.node.name}</div>
-          {rect.height > 55 && (
-            <div className="treemap-cell-size">
-              {formatSize(rect.node.size)}
-            </div>
-          )}
+          <div className="treemap-cell-name">
+            {isMoreItems ? "Click to expand" : rect.node.name}
+          </div>
+          <div className="treemap-cell-size">
+            {isMoreItems ? rect.node.name.replace("<", "").replace(">", "") : formatSize(rect.node.size)}
+          </div>
         </>
       )}
     </div>
@@ -123,6 +144,7 @@ function App() {
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [filterType, setFilterType] = useState<FileType | null>(null);
   const [searchText, setSearchText] = useState("");
+  const [minSizeFilter, setMinSizeFilter] = useState<number>(0); // in bytes
   const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -135,6 +157,7 @@ function App() {
   const [isFromCache, setIsFromCache] = useState(false);
   const [cacheTime, setCacheTime] = useState<number | null>(null);
   const [currentScanPath, setCurrentScanPath] = useState<string | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -274,29 +297,125 @@ function App() {
     setIsScanning(false);
   };
 
-  // Keyboard shortcuts: Cmd+O (macOS) or Ctrl+O (other) to open folder
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+O / Ctrl+O to open folder
       if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
         e.preventDefault();
         if (!isScanning) {
           handleOpenFolder();
         }
+        return;
+      }
+
+      // Don't handle navigation keys if scanning or no treemap
+      if (isScanning || filteredRects.length === 0) return;
+
+      // Escape - close menus and deselect
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        setShowFilterMenu(false);
+        setSelectedIndex(-1);
+        return;
+      }
+
+      // Backspace - go back in navigation
+      if (e.key === 'Backspace' && navigationPath.length > 0) {
+        e.preventDefault();
+        navigateToIndex(navigationPath.length - 2);
+        setSelectedIndex(-1);
+        return;
+      }
+
+      // Enter - navigate into selected item
+      if (e.key === 'Enter' && selectedIndex >= 0 && selectedIndex < filteredRects.length) {
+        e.preventDefault();
+        navigateTo(filteredRects[selectedIndex].node);
+        setSelectedIndex(-1);
+        return;
+      }
+
+      // Arrow keys - navigate between cells
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+
+        if (selectedIndex < 0) {
+          // No selection, select the largest (first) item
+          setSelectedIndex(0);
+          return;
+        }
+
+        const currentRect = filteredRects[selectedIndex];
+        const cx = currentRect.x + currentRect.width / 2;
+        const cy = currentRect.y + currentRect.height / 2;
+
+        let bestIndex = selectedIndex;
+        let bestDistance = Infinity;
+
+        filteredRects.forEach((rect, i) => {
+          if (i === selectedIndex) return;
+
+          const rx = rect.x + rect.width / 2;
+          const ry = rect.y + rect.height / 2;
+          const dx = rx - cx;
+          const dy = ry - cy;
+
+          // Check direction
+          let isValidDirection = false;
+          if (e.key === 'ArrowUp' && dy < -10) isValidDirection = true;
+          if (e.key === 'ArrowDown' && dy > 10) isValidDirection = true;
+          if (e.key === 'ArrowLeft' && dx < -10) isValidDirection = true;
+          if (e.key === 'ArrowRight' && dx > 10) isValidDirection = true;
+
+          if (isValidDirection) {
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestIndex = i;
+            }
+          }
+        });
+
+        setSelectedIndex(bestIndex);
       }
     };
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isScanning]);
+  }, [isScanning, filteredRects, selectedIndex, navigationPath, navigateTo, navigateToIndex]);
+
+  // Find a node by path in the tree
+  const findNodeByPath = useCallback((root: FileNode | null, path: string): FileNode | null => {
+    if (!root) return null;
+    if (root.path === path) return root;
+    for (const child of root.children) {
+      const found = findNodeByPath(child, path);
+      if (found) return found;
+    }
+    return null;
+  }, []);
 
   const navigateTo = useCallback(
     (node: FileNode) => {
-      // Only navigate into directories that have children and are not placeholder nodes
-      if (node.is_dir && node.children.length > 0 && !node.name.startsWith("<")) {
+      // Handle "<N more items>" placeholder - navigate to parent folder
+      if (node.name.startsWith("<") && node.name.includes("more items")) {
+        // The path points to the parent directory
+        const parentNode = findNodeByPath(rootNode, node.path);
+        if (parentNode && parentNode.children.length > 0) {
+          setNavigationPath((prev) => [...prev, parentNode]);
+          setCurrentNode(parentNode);
+        }
+        return;
+      }
+
+      // Only navigate into directories that have children
+      if (node.is_dir && node.children.length > 0) {
         setNavigationPath((prev) => [...prev, node]);
         setCurrentNode(node);
       }
     },
-    []
+    [rootNode, findNodeByPath]
   );
 
   const navigateToIndex = useCallback(
@@ -371,9 +490,22 @@ function App() {
       if (searchText && !rect.node.name.toLowerCase().includes(lowerSearchText)) {
         return false;
       }
+      if (minSizeFilter > 0 && rect.node.size < minSizeFilter) return false;
       return true;
     });
-  }, [treemapRects, filterType, searchText]);
+  }, [treemapRects, filterType, searchText, minSizeFilter]);
+
+  // Jump to largest item
+  const jumpToLargest = useCallback(() => {
+    if (filteredRects.length > 0) {
+      // Find the largest item (excluding containers at depth 0)
+      const largestIdx = filteredRects.reduce((maxIdx, rect, idx, arr) => {
+        if (rect.isContainer && rect.depth === 0) return maxIdx;
+        return rect.node.size > arr[maxIdx].node.size ? idx : maxIdx;
+      }, 0);
+      setSelectedIndex(largestIdx);
+    }
+  }, [filteredRects]);
 
   // Stable callbacks for memoized treemap cells
   const handleCellHover = useCallback((node: FileNode, e: React.MouseEvent) => {
@@ -507,6 +639,47 @@ function App() {
             </div>
           )}
         </div>
+
+        {/* Quick size filters */}
+        {rootNode && !isScanning && (
+          <div className="size-filters">
+            <button
+              className={`size-filter-btn${minSizeFilter === 0 ? " active" : ""}`}
+              onClick={() => setMinSizeFilter(0)}
+            >
+              All
+            </button>
+            <button
+              className={`size-filter-btn${minSizeFilter === 100 * 1024 * 1024 ? " active" : ""}`}
+              onClick={() => setMinSizeFilter(100 * 1024 * 1024)}
+            >
+              &gt;100MB
+            </button>
+            <button
+              className={`size-filter-btn${minSizeFilter === 1024 * 1024 * 1024 ? " active" : ""}`}
+              onClick={() => setMinSizeFilter(1024 * 1024 * 1024)}
+            >
+              &gt;1GB
+            </button>
+            <button
+              className={`size-filter-btn${minSizeFilter === 10 * 1024 * 1024 * 1024 ? " active" : ""}`}
+              onClick={() => setMinSizeFilter(10 * 1024 * 1024 * 1024)}
+            >
+              &gt;10GB
+            </button>
+          </div>
+        )}
+
+        {/* Jump to largest */}
+        {rootNode && !isScanning && (
+          <button
+            className="toolbar-btn jump-largest-btn"
+            onClick={jumpToLargest}
+            title="Jump to largest item (select it)"
+          >
+            <span aria-hidden="true">🎯</span> Largest
+          </button>
+        )}
 
         <div className="search-box">
           <span aria-hidden="true">&#128269;</span>
@@ -670,24 +843,28 @@ function App() {
 
         {rootNode && !isScanning && (
           <div className="treemap-container" ref={containerRef}>
-            {filteredRects.map((rect) => (
+            {filteredRects.map((rect, index) => (
               rect.isContainer ? (
                 <TreemapContainerCell
                   key={rect.id + "-container"}
                   rect={rect}
+                  isSelected={index === selectedIndex}
                   onHover={handleCellHover}
                   onLeave={handleCellLeave}
                   onNavigate={navigateTo}
                   onContextMenu={handleContextMenu}
+                  onSelect={() => setSelectedIndex(index)}
                 />
               ) : (
                 <TreemapLeafCell
                   key={rect.id}
                   rect={rect}
+                  isSelected={index === selectedIndex}
                   onHover={handleCellHover}
                   onLeave={handleCellLeave}
                   onNavigate={navigateTo}
                   onContextMenu={handleContextMenu}
+                  onSelect={() => setSelectedIndex(index)}
                 />
               )
             ))}
