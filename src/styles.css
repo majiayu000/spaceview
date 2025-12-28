@@ -22,9 +22,9 @@
   --bg-secondary: #16213e;
   --bg-tertiary: #0f3460;
   --text-primary: #ffffff;
-  --text-secondary: #a0a0a0;
+  --text-secondary: #b8b8b8;  /* Improved contrast: 8.5:1 on bg-primary */
   --accent: #e94560;
-  --border: #2a2a4a;
+  --border: #3a3a5a;  /* Slightly lighter for better visibility */
 }
 
 body {
@@ -419,16 +419,14 @@ button.breadcrumb-item {
 .treemap-cell-size {
   font-size: 10px;
   font-weight: 500;
-  opacity: 0.9;
-  color: white;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.95);  /* High contrast white */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
 }
 
 /* File type icon indicator */
 .treemap-cell-icon {
   font-size: 14px;
   margin-bottom: 2px;
-  opacity: 0.9;
 }
 
 /* Container folder styles (SpaceSniffer-style nesting) */
@@ -484,17 +482,17 @@ button.breadcrumb-item {
   flex-shrink: 0;
 }
 
-/* Depth-based styling for leaf cells */
+/* Depth-based styling for leaf cells - use filter instead of opacity for better contrast */
 .treemap-cell.depth-1 {
-  opacity: 0.95;
+  filter: brightness(0.95);
 }
 
 .treemap-cell.depth-2 {
-  opacity: 0.9;
+  filter: brightness(0.90);
 }
 
 .treemap-cell.depth-3 {
-  opacity: 0.85;
+  filter: brightness(0.85);
 }
 
 /* Context menu */
