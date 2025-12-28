@@ -86,12 +86,10 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
 }) {
   const isMoreItems = rect.node.name.startsWith("<") && rect.node.name.includes("more items");
 
-  const handleClick = () => {
-    onSelect();
-    if (isMoreItems) {
-      onNavigate(rect.node);
-    }
-  };
+  // Extract count from "<N more items>"
+  const moreItemsCount = isMoreItems
+    ? parseInt(rect.node.name.match(/\d+/)?.[0] || "0")
+    : 0;
 
   return (
     <div
@@ -108,7 +106,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
       onMouseEnter={(e) => onHover(rect.node, e)}
       onMouseMove={(e) => onHover(rect.node, e)}
       onMouseLeave={onLeave}
-      onClick={handleClick}
+      onClick={onSelect}
       onDoubleClick={isMoreItems ? undefined : () => onNavigate(rect.node)}
       onContextMenu={(e) => onContextMenu(e, rect.node)}
     >
@@ -116,14 +114,14 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
         <>
           {rect.height > 60 && (
             <div className="treemap-cell-icon">
-              {isMoreItems ? "📂" : getFileIcon(rect.node)}
+              {isMoreItems ? "📁" : getFileIcon(rect.node)}
             </div>
           )}
           <div className="treemap-cell-name">
-            {isMoreItems ? "Click to expand" : rect.node.name}
+            {isMoreItems ? `+${moreItemsCount} hidden` : rect.node.name}
           </div>
           <div className="treemap-cell-size">
-            {isMoreItems ? rect.node.name.replace("<", "").replace(">", "") : formatSize(rect.node.size)}
+            {isMoreItems ? formatSize(rect.node.size) : formatSize(rect.node.size)}
           </div>
         </>
       )}
@@ -428,24 +426,13 @@ function App() {
 
   const navigateTo = useCallback(
     (node: FileNode) => {
-      // Handle "<N more items>" placeholder - navigate to parent folder
-      if (node.name.startsWith("<") && node.name.includes("more items")) {
-        // The path points to the parent directory
-        const parentNode = findNodeByPath(rootNode, node.path);
-        if (parentNode && parentNode.children.length > 0) {
-          setNavigationPath((prev) => [...prev, parentNode]);
-          setCurrentNode(parentNode);
-        }
-        return;
-      }
-
       // Only navigate into directories that have children
       if (node.is_dir && node.children.length > 0) {
         setNavigationPath((prev) => [...prev, node]);
         setCurrentNode(node);
       }
     },
-    [rootNode, findNodeByPath]
+    []
   );
 
   const navigateToIndex = useCallback(
