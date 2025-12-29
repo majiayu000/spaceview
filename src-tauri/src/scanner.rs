@@ -7,9 +7,10 @@
 //! 4. Streaming results with crossbeam channels
 //! 5. Bottom-up size calculation with iterative post-order
 
+use crate::settings::Settings;
 use crossbeam_channel::bounded;
 use dashmap::{DashMap, DashSet};
-use ignore::{WalkBuilder, WalkState};
+use ignore::{gitignore::GitignoreBuilder, WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,10 @@ pub struct ScanMetrics {
     pub files_per_sec: u64,
     pub nodes_in_map: usize,
     pub memory_used_mb: f64,
+    // Memory tracking per phase
+    pub memory_after_walk_mb: f64,
+    pub memory_after_relations_mb: f64,
+    pub memory_peak_mb: f64,
 }
 
 /// Get current process memory usage in bytes (macOS)
@@ -54,9 +59,52 @@ fn get_memory_usage() -> u64 {
     0
 }
 
-const MAX_CHILDREN: usize = 200;  // Children per directory before grouping
-const MAX_DEPTH: usize = 15;      // Maximum tree depth
-const MAX_TOTAL_NODES: usize = 100_000;  // Absolute limit on total nodes in tree
+const MAX_CHILDREN: usize = 500;   // Children per directory before grouping
+const MAX_DEPTH: usize = 25;       // Maximum tree depth
+const MAX_TOTAL_NODES: usize = 200_000;  // Limit for IPC transfer (~60MB JSON)
+
+/// Parse a .spaceignore file and return patterns.
+/// Format is similar to .gitignore:
+/// - One pattern per line
+/// - Lines starting with # are comments
+/// - Empty lines are ignored
+fn parse_spaceignore(root_path: &Path) -> Vec<String> {
+    let spaceignore_path = root_path.join(".spaceignore");
+
+    if !spaceignore_path.exists() {
+        return Vec::new();
+    }
+
+    match std::fs::read_to_string(&spaceignore_path) {
+        Ok(content) => {
+            content
+                .lines()
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(|line| line.to_string())
+                .collect()
+        }
+        Err(e) => {
+            eprintln!("[SpaceView] Failed to read .spaceignore: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+fn build_ignore_matcher(root_path: &Path, patterns: &[String]) -> Option<ignore::gitignore::Gitignore> {
+    if patterns.is_empty() {
+        return None;
+    }
+
+    let mut builder = GitignoreBuilder::new(root_path);
+    for pattern in patterns {
+        if let Err(err) = builder.add_line(None, pattern) {
+            eprintln!("[SpaceView] Invalid ignore pattern '{}': {}", pattern, err);
+        }
+    }
+
+    builder.build().ok()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
@@ -114,13 +162,14 @@ impl Default for ScannerState {
 }
 
 // Lightweight node for parallel collection
+// Memory-optimized: files don't allocate children_paths Vec
 struct TempNode {
-    name: String,
+    name: Box<str>,           // Box<str> saves 8 bytes vs String (no capacity)
     size: u64,
     is_dir: bool,
-    extension: Option<String>,
+    extension: Option<Box<str>>,
     modified_at: Option<u64>,
-    children_paths: Vec<PathBuf>,
+    children_paths: Option<Vec<PathBuf>>,  // None for files saves 24 bytes per file
 }
 
 pub struct Scanner {
@@ -132,13 +181,17 @@ impl Scanner {
         Self { state }
     }
 
-    pub fn scan(&self, root_path: &Path, app_handle: &AppHandle) -> Option<FileNode> {
+    pub fn scan(&self, root_path: &Path, app_handle: &AppHandle, settings: &Settings) -> Option<FileNode> {
         self.state.reset();
 
         let total_start = Instant::now();
         println!("\n{}", "=".repeat(60));
         println!("[SpaceView] Starting scan: {:?}", root_path);
         println!("[SpaceView] Threads: {}", num_cpus::get());
+        println!("[SpaceView] Settings: show_hidden={}, max_depth={:?}, ignore_patterns={}",
+            settings.show_hidden_files,
+            settings.max_scan_depth,
+            settings.ignore_patterns.len());
         println!("{}", "=".repeat(60));
 
         let scanned_files = Arc::new(AtomicU64::new(0));
@@ -181,16 +234,45 @@ impl Scanner {
         let walk_start = Instant::now();
         println!("[Phase 1] Starting parallel walk...");
 
+        // Pre-compute ignore patterns for efficient matching
+        // Combine settings patterns with .spaceignore patterns from the scanned directory
+        let spaceignore_patterns = parse_spaceignore(root_path);
+        let combined_patterns: Vec<String> = settings
+            .ignore_patterns
+            .iter()
+            .cloned()
+            .chain(spaceignore_patterns)
+            .collect();
+
+        if !combined_patterns.is_empty() {
+            println!("[SpaceView] Using {} ignore patterns ({} from settings, {} from .spaceignore)",
+                combined_patterns.len(),
+                settings.ignore_patterns.len(),
+                combined_patterns.len() - settings.ignore_patterns.len());
+        }
+
+        let ignore_matcher = build_ignore_matcher(root_path, &combined_patterns)
+            .map(Arc::new);
+        let show_hidden = settings.show_hidden_files;
+        let max_depth = settings.max_scan_depth;
+
         let num_threads = num_cpus::get();
-        let walker = WalkBuilder::new(root_path)
-            .hidden(false)           // Include hidden files
+        let mut walker_builder = WalkBuilder::new(root_path);
+        walker_builder
+            .hidden(!show_hidden)    // hidden(true) = skip hidden files
             .ignore(false)           // Don't respect .gitignore
             .git_ignore(false)       // Don't respect .gitignore
             .git_global(false)       // Don't respect global gitignore
             .git_exclude(false)      // Don't respect .git/info/exclude
             .follow_links(false)     // Don't follow symlinks
-            .threads(num_threads)
-            .build_parallel();
+            .threads(num_threads);
+
+        // Apply max depth if configured
+        if let Some(depth) = max_depth {
+            walker_builder.max_depth(Some(depth as usize));
+        }
+
+        let walker = walker_builder.build_parallel();
 
         let nodes_clone = nodes.clone();
         let files_clone = scanned_files.clone();
@@ -199,6 +281,7 @@ impl Scanner {
         let cancel_clone = self.state.clone();
         let progress_tx_clone = progress_tx.clone();
         let seen_inodes_clone = seen_inodes.clone();
+        let ignore_matcher_clone = ignore_matcher.clone();
 
         // Parallel walk with work-stealing + lock-free DashMap
         walker.run(|| {
@@ -209,6 +292,7 @@ impl Scanner {
             let cancel = cancel_clone.clone();
             let tx = progress_tx_clone.clone();
             let seen = seen_inodes_clone.clone();
+            let matcher = ignore_matcher_clone.clone();
             let mut counter: u64 = 0;
 
             Box::new(move |entry| {
@@ -224,6 +308,16 @@ impl Scanner {
                 let path = entry.path().to_path_buf();
                 // Use file_type() - comes from readdir, no extra syscall
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+                // Check if this path should be ignored
+                if let Some(ref matcher) = matcher {
+                    let relative = path.strip_prefix(root_path).unwrap_or(&path);
+                    let matched = matcher.matched_path_or_any_parents(relative, is_dir);
+                    if matched.is_ignore() {
+                        // For directories, skip the entire subtree
+                        return if is_dir { WalkState::Skip } else { WalkState::Continue };
+                    }
+                }
 
                 // Get metadata for inode tracking, size, and modification time
                 let metadata = entry.metadata();
@@ -274,18 +368,19 @@ impl Scanner {
                 let stored_size = if is_duplicate { 0 } else { file_size };
 
                 // DashMap insert is lock-free!
+                // Memory optimization: files don't need children_paths Vec
                 nodes.insert(path.clone(), TempNode {
-                    name,
+                    name: name.into_boxed_str(),
                     size: stored_size,
                     is_dir,
-                    extension,
+                    extension: extension.map(|s| s.into_boxed_str()),
                     modified_at,
-                    children_paths: Vec::new(),
+                    children_paths: if is_dir { Some(Vec::new()) } else { None },
                 });
 
                 // Send progress every 1000 items
                 counter += 1;
-                if counter % 1000 == 0 {
+                if counter.is_multiple_of(1000) {
                     let _ = tx.try_send((
                         files.load(Ordering::Relaxed),
                         dirs.load(Ordering::Relaxed),
@@ -309,6 +404,11 @@ impl Scanner {
         let unique_inodes = seen_inodes.len();
         let hard_link_duplicates = files_count.saturating_sub(unique_inodes as u64);
 
+        // Track memory after walk phase
+        let memory_after_walk = get_memory_usage();
+        let memory_after_walk_mb = memory_after_walk as f64 / 1_048_576.0;
+        let mut memory_peak = memory_after_walk;
+
         println!("[Phase 1] Walk completed in {:?}", walk_time);
         println!("          Files: {}, Dirs: {}, Total: {}",
             files_count, dirs_count, nodes_count);
@@ -319,6 +419,7 @@ impl Scanner {
         println!("          Speed: {:.0} files/sec",
             files_count as f64 / walk_time.as_secs_f64());
         println!("          Size: {:.2} GB (deduplicated)", size_total as f64 / 1_073_741_824.0);
+        println!("          Memory: {:.1} MB", memory_after_walk_mb);
 
         if self.state.is_cancelled() { return None; }
 
@@ -333,21 +434,74 @@ impl Scanner {
         });
         let relation_start = Instant::now();
         println!("[Phase 2] Building parent-child relationships...");
+
+        // Memory optimization: Process in batches to avoid peak memory spike
+        // Instead of collecting all pairs at once, process in chunks
+        const BATCH_SIZE: usize = 50_000;
+
         {
-            let all_paths: Vec<PathBuf> = nodes.iter().map(|r| r.key().clone()).collect();
-            for path in all_paths {
+            let mut processed_paths: usize = 0;
+            let mut batch_idx: usize = 0;
+            let mut batch_pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(BATCH_SIZE);
+
+            for entry in nodes.iter() {
+                let path = entry.key().clone();
+                drop(entry);
+
                 if let Some(parent) = path.parent() {
                     let parent_path = parent.to_path_buf();
                     if nodes.contains_key(&parent_path) {
-                        if let Some(mut parent_node) = nodes.get_mut(&parent_path) {
-                            parent_node.children_paths.push(path.clone());
+                        batch_pairs.push((path, parent_path));
+                        if batch_pairs.len() >= BATCH_SIZE {
+                            for (child_path, parent_path) in batch_pairs.drain(..) {
+                                if let Some(mut parent_node) = nodes.get_mut(&parent_path) {
+                                    if let Some(ref mut children) = parent_node.children_paths {
+                                        children.push(child_path);
+                                    }
+                                }
+                            }
+                            batch_idx += 1;
+
+                            if self.state.is_cancelled() {
+                                println!("[Phase 2] Cancelled at batch {}", batch_idx);
+                                return None;
+                            }
                         }
                     }
                 }
+
+                processed_paths += 1;
             }
+
+            if !batch_pairs.is_empty() {
+                for (child_path, parent_path) in batch_pairs.drain(..) {
+                    if let Some(mut parent_node) = nodes.get_mut(&parent_path) {
+                        if let Some(ref mut children) = parent_node.children_paths {
+                            children.push(child_path);
+                        }
+                    }
+                }
+                batch_idx += 1;
+            }
+
+            println!(
+                "[Phase 2] Processed {} paths in {} batches",
+                processed_paths,
+                batch_idx
+            );
         }
+
         let relation_time = relation_start.elapsed();
+
+        // Track memory after relations phase
+        let memory_after_relations = get_memory_usage();
+        let memory_after_relations_mb = memory_after_relations as f64 / 1_048_576.0;
+        memory_peak = memory_peak.max(memory_after_relations);
+
         println!("[Phase 2] Relationships built in {:?}", relation_time);
+        println!("          Memory: {:.1} MB (delta: {:+.1} MB)",
+            memory_after_relations_mb,
+            memory_after_relations_mb - memory_after_walk_mb);
 
         // Phase 3: Calculate sizes bottom-up
         let _ = app_handle.emit("scan-progress", ScanProgress {
@@ -381,10 +535,26 @@ impl Scanner {
         let tree_time = tree_start.elapsed();
         println!("[Phase 4] Tree built in {:?} ({} nodes for UI)", tree_time, final_node_count);
 
+        // Measure memory before cleanup
+        let memory_before = get_memory_usage();
+        let memory_before_mb = memory_before as f64 / 1_048_576.0;
+        memory_peak = memory_peak.max(memory_before);
+
+        // Phase 5: Memory cleanup - explicitly drop temporary data structures
+        println!("[Phase 5] Releasing temporary memory...");
+        let cleanup_start = Instant::now();
+        drop(nodes);         // Release DashMap<PathBuf, TempNode>
+        drop(seen_inodes);   // Release DashSet<(u64, u64)>
+        let cleanup_time = cleanup_start.elapsed();
+
+        // Measure memory after cleanup
+        let memory_after = get_memory_usage();
+        let memory_after_mb = memory_after as f64 / 1_048_576.0;
+        let memory_freed_mb = memory_before_mb - memory_after_mb;
+        println!("[Phase 5] Memory released in {:?} ({:.1} MB freed)", cleanup_time, memory_freed_mb.max(0.0));
+
         // Final summary
         let total_time = total_start.elapsed();
-        let memory_bytes = get_memory_usage();
-        let memory_mb = memory_bytes as f64 / 1_048_576.0;
 
         println!("{}", "=".repeat(60));
         println!("[SpaceView] SCAN COMPLETE");
@@ -405,8 +575,13 @@ impl Scanner {
         println!("  Total size:     {:.2} GB", size_total as f64 / 1_073_741_824.0);
         println!("  Throughput:     {:.0} files/sec", files_count as f64 / total_time.as_secs_f64());
         println!("{}", "-".repeat(60));
-        println!("  Memory used:    {:.1} MB", memory_mb);
-        println!("  Per-node mem:   {:.0} bytes/node", memory_bytes as f64 / nodes_count as f64);
+        println!("  Peak memory:    {:.1} MB", memory_peak as f64 / 1_048_576.0);
+        println!("  Final memory:   {:.1} MB", memory_after_mb);
+        if nodes_count > 0 {
+            println!("  Per-node mem:   {:.0} bytes/node (peak)", memory_peak as f64 / nodes_count as f64);
+        } else {
+            println!("  Per-node mem:   n/a");
+        }
         println!("{}", "=".repeat(60));
 
         // Emit metrics event for UI
@@ -421,7 +596,10 @@ impl Scanner {
             total_size: size_total,
             files_per_sec: (files_count as f64 / total_time.as_secs_f64()) as u64,
             nodes_in_map: nodes_count,
-            memory_used_mb: memory_mb,
+            memory_used_mb: memory_after_mb,  // Report post-cleanup memory
+            memory_after_walk_mb,
+            memory_after_relations_mb,
+            memory_peak_mb: memory_peak as f64 / 1_048_576.0,
         };
         let _ = app_handle.emit("scan-metrics", metrics);
 
@@ -440,32 +618,31 @@ impl Scanner {
     fn calc_sizes_bottomup_dashmap(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, root: &Path) {
         // Get post-order traversal
         let mut stack: Vec<(PathBuf, bool)> = vec![(root.to_path_buf(), false)];
-        let mut post_order: Vec<PathBuf> = Vec::with_capacity(nodes.len());
 
         while let Some((path, visited)) = stack.pop() {
             if visited {
-                post_order.push(path);
+                if let Some(node) = nodes.get(&path) {
+                    if node.is_dir {
+                        if let Some(ref children) = node.children_paths {
+                            let children_size: u64 = children
+                                .iter()
+                                .filter_map(|cp| nodes.get(cp))
+                                .map(|cn| cn.size)
+                                .sum();
+                            drop(node); // Release read lock before write
+                            if let Some(mut node_mut) = nodes.get_mut(&path) {
+                                node_mut.size = children_size;
+                            }
+                        }
+                    }
+                }
             } else {
                 stack.push((path.clone(), true));
                 if let Some(node) = nodes.get(&path) {
-                    for child in &node.children_paths {
-                        stack.push((child.clone(), false));
-                    }
-                }
-            }
-        }
-
-        // Calculate sizes in post-order
-        for path in post_order {
-            if let Some(node) = nodes.get(&path) {
-                if node.is_dir {
-                    let children_size: u64 = node.children_paths.iter()
-                        .filter_map(|cp| nodes.get(cp))
-                        .map(|cn| cn.size)
-                        .sum();
-                    drop(node); // Release read lock before write
-                    if let Some(mut node_mut) = nodes.get_mut(&path) {
-                        node_mut.size = children_size;
+                    if let Some(ref children) = node.children_paths {
+                        for child in children {
+                            stack.push((child.clone(), false));
+                        }
                     }
                 }
             }
@@ -473,11 +650,10 @@ impl Scanner {
     }
 
     fn build_tree_dashmap(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path, depth: usize, node_count: &AtomicU64) -> Option<FileNode> {
-        // Check if we've hit the total node limit
+        // Check total node limit to keep JSON size manageable for IPC
         if node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64 {
             return None;
         }
-
         let node = nodes.get(path)?;
         let path_str = path.to_string_lossy().to_string();
 
@@ -487,58 +663,57 @@ impl Scanner {
         if !node.is_dir {
             return Some(FileNode {
                 id: path_str.clone(),
-                name: node.name.clone(),
+                name: node.name.to_string(),
                 path: path_str,
                 size: node.size,
                 is_dir: false,
                 children: vec![],
-                extension: node.extension.clone(),
+                extension: node.extension.as_ref().map(|s| s.to_string()),
                 file_count: 0,
                 dir_count: 0,
                 modified_at: node.modified_at,
             });
         }
 
-        // Sort children by size (descending)
-        let children_paths = node.children_paths.clone();
+        // Sort children by size (descending) while caching size/is_dir metadata.
+        let children_paths = node.children_paths.clone().unwrap_or_default();
         drop(node); // Release lock for recursive calls
 
-        let mut children_sorted: Vec<PathBuf> = children_paths;
-        children_sorted.sort_by(|a, b| {
-            let size_a = nodes.get(a).map(|n| n.size).unwrap_or(0);
-            let size_b = nodes.get(b).map(|n| n.size).unwrap_or(0);
-            size_b.cmp(&size_a)
-        });
+        let mut children_with_meta: Vec<(PathBuf, u64, bool)> = Vec::with_capacity(children_paths.len());
+        for child_path in children_paths {
+            if let Some(child_node) = nodes.get(&child_path) {
+                children_with_meta.push((child_path, child_node.size, child_node.is_dir));
+            }
+        }
+
+        children_with_meta.sort_by(|a, b| b.1.cmp(&a.1));
 
         let mut children = Vec::new();
         let mut other_size: u64 = 0;
         let mut other_file_count: u64 = 0;
         let mut other_dir_count: u64 = 0;
 
-        for (i, child_path) in children_sorted.iter().enumerate() {
-            // Check total node limit before recursing
+        for (i, (child_path, child_size, child_is_dir)) in children_with_meta.iter().enumerate() {
+            // Check all limits: children count, depth, and total nodes
             let at_limit = node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64;
-
             if i < MAX_CHILDREN && depth < MAX_DEPTH && !at_limit {
                 if let Some(child) = self.build_tree_dashmap(nodes, child_path, depth + 1, node_count) {
                     children.push(child);
-                } else if let Some(cn) = nodes.get(child_path) {
+                } else {
                     // Node was skipped due to limit, count as "other"
-                    other_size += cn.size;
-                    if cn.is_dir {
+                    other_size += *child_size;
+                    if *child_is_dir {
                         other_dir_count += 1;
                     } else {
                         other_file_count += 1;
                     }
                 }
             } else {
-                if let Some(cn) = nodes.get(child_path) {
-                    other_size += cn.size;
-                    if cn.is_dir {
-                        other_dir_count += 1;
-                    } else {
-                        other_file_count += 1;
-                    }
+                other_size += *child_size;
+                if *child_is_dir {
+                    other_dir_count += 1;
+                } else {
+                    other_file_count += 1;
                 }
             }
         }
@@ -568,7 +743,7 @@ impl Scanner {
         let node = nodes.get(&path.to_path_buf())?;
         Some(FileNode {
             id: path_str.clone(),
-            name: node.name.clone(),
+            name: node.name.to_string(),
             path: path_str,
             size: node.size,
             is_dir: true,

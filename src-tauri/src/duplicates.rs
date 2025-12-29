@@ -144,7 +144,7 @@ impl DuplicateFinder {
                     let size = meta.len();
                     if size >= min_size {
                         files.entry(size)
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(path.to_path_buf());
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
@@ -219,11 +219,11 @@ impl DuplicateFinder {
                         return (path.clone(), None);
                     }
 
-                    let hash = compute_file_hash(path, *size);
+                    let hash = compute_partial_hash(path, *size);
                     let count = hashed.fetch_add(1, Ordering::Relaxed);
 
                     // Emit progress every 100 files
-                    if count % 100 == 0 {
+                    if count.is_multiple_of(100) {
                         let _ = app.emit("duplicate-progress", DuplicateProgress {
                             phase: "hashing".to_string(),
                             scanned_files: total_files,
@@ -239,21 +239,8 @@ impl DuplicateFinder {
                 })
                 .collect();
 
-            // Group by hash
-            let mut hash_groups: std::collections::HashMap<String, Vec<PathBuf>> =
-                std::collections::HashMap::new();
-
-            for (path, hash) in hashes {
-                if let Some(h) = hash {
-                    hash_groups.entry(h).or_insert_with(Vec::new).push(path);
-                }
-            }
-
-            // Add groups with duplicates
-            for (hash, files) in hash_groups {
-                if files.len() > 1 {
-                    duplicate_groups.insert(hash, (*size, files));
-                }
+            for (hash, files) in group_duplicates_for_hashes(*size, hashes) {
+                duplicate_groups.insert(hash, (*size, files));
             }
         });
 
@@ -319,33 +306,141 @@ impl DuplicateFinder {
     }
 }
 
-fn compute_file_hash(path: &Path, size: u64) -> Option<String> {
+fn group_duplicates_for_hashes(
+    size: u64,
+    hashes: Vec<(PathBuf, Option<String>)>,
+) -> Vec<(String, Vec<PathBuf>)> {
+    let mut hash_groups: std::collections::HashMap<String, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+
+    for (path, hash) in hashes {
+        if let Some(h) = hash {
+            hash_groups.entry(h).or_default().push(path);
+        }
+    }
+
+    if size <= PARTIAL_HASH_SIZE * 2 {
+        return hash_groups
+            .into_iter()
+            .filter(|(_, files)| files.len() > 1)
+            .collect();
+    }
+
+    let mut full_groups: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for (_, files) in hash_groups {
+        if files.len() <= 1 {
+            continue;
+        }
+
+        let mut full_hash_groups: std::collections::HashMap<String, Vec<PathBuf>> =
+            std::collections::HashMap::new();
+        for path in files {
+            if let Some(hash) = compute_full_hash(&path) {
+                full_hash_groups.entry(hash).or_default().push(path);
+            }
+        }
+
+        for (hash, files) in full_hash_groups {
+            if files.len() > 1 {
+                full_groups.push((hash, files));
+            }
+        }
+    }
+
+    full_groups
+}
+
+fn compute_partial_hash(path: &Path, size: u64) -> Option<String> {
+    if size <= PARTIAL_HASH_SIZE * 2 {
+        return compute_full_hash(path);
+    }
+
     let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; PARTIAL_HASH_SIZE as usize];
 
-    // For small files, hash entire content
-    // For large files, hash first 64KB + last 64KB + size (optimization)
-    if size <= PARTIAL_HASH_SIZE * 2 {
-        // Hash entire file
-        let mut buffer = vec![0u8; size as usize];
-        reader.read_exact(&mut buffer).ok()?;
-        hasher.update(&buffer);
-    } else {
-        // Hash first 64KB
-        let mut buffer = vec![0u8; PARTIAL_HASH_SIZE as usize];
-        reader.read_exact(&mut buffer).ok()?;
-        hasher.update(&buffer);
+    reader.read_exact(&mut buffer).ok()?;
+    hasher.update(&buffer);
 
-        // Hash last 64KB
-        reader.seek(SeekFrom::End(-(PARTIAL_HASH_SIZE as i64))).ok()?;
-        reader.read_exact(&mut buffer).ok()?;
-        hasher.update(&buffer);
+    reader.seek(SeekFrom::End(-(PARTIAL_HASH_SIZE as i64))).ok()?;
+    reader.read_exact(&mut buffer).ok()?;
+    hasher.update(&buffer);
 
-        // Include file size in hash to reduce false positives
-        hasher.update(size.to_le_bytes());
+    // Include file size in hash to reduce false positives
+    hasher.update(size.to_le_bytes());
+
+    let result = hasher.finalize();
+    Some(format!("{:x}", result))
+}
+
+fn compute_full_hash(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+
+    loop {
+        let read = reader.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
     }
 
     let result = hasher.finalize();
     Some(format!("{:x}", result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!("{}-{}-{}", prefix, std::process::id(), nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_patterned_file(path: &Path, middle_byte: u8) {
+        let mut file = File::create(path).unwrap();
+        let prefix = vec![b'A'; PARTIAL_HASH_SIZE as usize];
+        let middle = vec![middle_byte; 1024];
+        let suffix = vec![b'Z'; PARTIAL_HASH_SIZE as usize];
+        file.write_all(&prefix).unwrap();
+        file.write_all(&middle).unwrap();
+        file.write_all(&suffix).unwrap();
+    }
+
+    #[test]
+    fn test_duplicates_use_full_hash_for_large_files() {
+        let dir = make_temp_dir("spaceview-dup-test");
+        let file_a = dir.join("a.bin");
+        let file_b = dir.join("b.bin");
+
+        write_patterned_file(&file_a, b'B');
+        write_patterned_file(&file_b, b'C');
+
+        let size = fs::metadata(&file_a).unwrap().len();
+
+        let hashes = vec![
+            (file_a.clone(), compute_partial_hash(&file_a, size)),
+            (file_b.clone(), compute_partial_hash(&file_b, size)),
+        ];
+
+        assert_eq!(hashes[0].1, hashes[1].1, "partial hashes should match");
+
+        let groups = group_duplicates_for_hashes(size, hashes);
+        assert!(groups.is_empty(), "full hash should avoid false duplicates");
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

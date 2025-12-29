@@ -39,6 +39,7 @@ trash = "5"             # safe cross-platform trash operations
 bincode = "1.3"         # fast binary serialization
 dirs = "5"              # platform-specific directories
 sha2 = "0.10"           # hash for cache keys
+base64 = "0.22"         # base64 encoding for file preview
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

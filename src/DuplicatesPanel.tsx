@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -7,6 +7,7 @@ import {
   DuplicateGroup,
   formatSize,
 } from "./types";
+import { useErrorNotification, useSettings } from "./contexts";
 
 interface DuplicatesPanelProps {
   scanPath: string;
@@ -19,11 +20,28 @@ export function DuplicatesPanel({
   onClose,
   onShowInFinder,
 }: DuplicatesPanelProps) {
+  const { showError } = useErrorNotification();
+  const { settings } = useSettings();
+
   const [isScanning, setIsScanning] = useState(false);
   const [progress, setProgress] = useState<DuplicateProgress | null>(null);
   const [result, setResult] = useState<DuplicateResult | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [minSize, setMinSize] = useState<number>(1024 * 1024); // 1MB default
+  const initializedRef = useRef(false);
+
+  // Apply settings on first render
+  useEffect(() => {
+    if (!initializedRef.current) {
+      setMinSize(settings.duplicate_min_size);
+      initializedRef.current = true;
+    }
+  }, [settings.duplicate_min_size]);
+
+  // Create size formatter with current settings
+  const formatSizeWithUnit = useCallback((bytes: number) => {
+    return formatSize(bytes, settings.size_unit);
+  }, [settings.size_unit]);
 
   useEffect(() => {
     let unlistenProgress: UnlistenFn | undefined;
@@ -62,7 +80,7 @@ export function DuplicatesPanel({
         setResult(duplicates);
       }
     } catch (err) {
-      console.error("Duplicate scan failed:", err);
+      showError(`Duplicate scan failed: ${err}`);
     } finally {
       setIsScanning(false);
     }
@@ -187,7 +205,7 @@ export function DuplicatesPanel({
             <div className="summary-item wasted">
               <span className="summary-label">Wasted:</span>
               <span className="summary-value">
-                {formatSize(result.total_wasted_bytes)}
+                {formatSizeWithUnit(result.total_wasted_bytes)}
               </span>
             </div>
             <div className="summary-item">
@@ -210,9 +228,9 @@ export function DuplicatesPanel({
                       {expandedGroups.has(group.hash) ? "v" : ">"}
                     </span>
                     <span className="group-count">{group.files.length}x</span>
-                    <span className="group-size">{formatSize(group.size)}</span>
+                    <span className="group-size">{formatSizeWithUnit(group.size)}</span>
                     <span className="group-wasted">
-                      (-{formatSize(group.wasted_bytes)})
+                      (-{formatSizeWithUnit(group.wasted_bytes)})
                     </span>
                     <span className="group-name" title={group.files[0]?.name}>
                       {group.files[0]?.name}

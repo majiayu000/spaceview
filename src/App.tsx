@@ -10,6 +10,7 @@ import {
   FileType,
   CachedScan,
   ScanHistoryEntry,
+  DeletedItem,
   FILE_TYPE_COLORS,
   FILE_TYPE_NAMES,
   getFileGradient,
@@ -20,9 +21,19 @@ import {
 } from "./types";
 import { layoutTreemap } from "./treemap";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { applyTheme } from "./themes";
 import { FileTypeChart } from "./FileTypeChart";
 import { LargeFilesPanel } from "./LargeFilesPanel";
 import { DuplicatesPanel } from "./DuplicatesPanel";
+import { CleanableFilesPanel } from "./CleanableFilesPanel";
+import ScanComparePanel from "./ScanComparePanel";
+import { useVirtualizedRects } from "./hooks";
+import { useSettings } from "./contexts";
+import { SettingsPanel } from "./SettingsPanel";
+import { OnboardingGuide } from "./OnboardingGuide";
+import { KeyboardShortcutsPanel } from "./components/KeyboardShortcutsPanel";
+import { ScanPerformanceStats } from "./components/ScanPerformanceStats";
+import { themeList } from "./themes";
 
 // Memoized container cell component to prevent re-renders
 const TreemapContainerCell = React.memo(function TreemapContainerCell({
@@ -33,6 +44,7 @@ const TreemapContainerCell = React.memo(function TreemapContainerCell({
   onNavigate,
   onContextMenu,
   onSelect,
+  sizeUnit,
 }: {
   rect: TreemapRect;
   isSelected: boolean;
@@ -41,6 +53,7 @@ const TreemapContainerCell = React.memo(function TreemapContainerCell({
   onNavigate: (node: FileNode) => void;
   onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
   onSelect: () => void;
+  sizeUnit: "si" | "binary";
 }) {
   return (
     <div
@@ -61,16 +74,40 @@ const TreemapContainerCell = React.memo(function TreemapContainerCell({
       {rect.height > 50 && (
         <div className="treemap-container-header">
           <span className="treemap-container-name">{rect.node.name}</span>
-          <span className="treemap-container-size">{formatSize(rect.node.size)}</span>
+          <span className="treemap-container-size">{formatSize(rect.node.size, sizeUnit)}</span>
         </div>
       )}
     </div>
   );
 });
 
-// Helper function to highlight matching text
-function highlightText(text: string, searchText: string): React.ReactNode {
+// Helper function to highlight matching text (supports plain text and regex)
+function highlightText(text: string, searchText: string, useRegex: boolean = false): React.ReactNode {
   if (!searchText) return text;
+
+  if (useRegex) {
+    try {
+      const regex = new RegExp(`(${searchText})`, "gi");
+      const parts = text.split(regex);
+      if (parts.length === 1) return text; // No match
+      return (
+        <>
+          {parts.map((part, i) =>
+            regex.test(part) ? (
+              <mark key={i} className="search-highlight">{part}</mark>
+            ) : (
+              part
+            )
+          )}
+        </>
+      );
+    } catch {
+      // Invalid regex, fall back to plain text search
+      return text;
+    }
+  }
+
+  // Plain text search
   const lowerText = text.toLowerCase();
   const lowerSearch = searchText.toLowerCase();
   const index = lowerText.indexOf(lowerSearch);
@@ -92,22 +129,26 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
   isSearchMatch,
   isCurrentSearchMatch,
   searchText,
+  useRegex,
   onHover,
   onLeave,
   onNavigate,
   onContextMenu,
   onSelect,
+  sizeUnit,
 }: {
   rect: TreemapRect;
   isSelected: boolean;
   isSearchMatch: boolean;
   isCurrentSearchMatch: boolean;
   searchText: string;
+  useRegex: boolean;
   onHover: (node: FileNode, e: React.MouseEvent) => void;
   onLeave: () => void;
   onNavigate: (node: FileNode) => void;
   onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
   onSelect: () => void;
+  sizeUnit: "si" | "binary";
 }) {
   const isMoreItems = rect.node.name.startsWith("<") && rect.node.name.includes("more items");
 
@@ -152,10 +193,10 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
             </div>
           )}
           <div className="treemap-cell-name">
-            {isMoreItems ? `+${moreItemsCount} hidden` : highlightText(rect.node.name, searchText)}
+            {isMoreItems ? `+${moreItemsCount} more` : highlightText(rect.node.name, searchText, useRegex)}
           </div>
           <div className="treemap-cell-size">
-            {isMoreItems ? formatSize(rect.node.size) : formatSize(rect.node.size)}
+            {formatSize(rect.node.size, sizeUnit)}
           </div>
         </>
       )}
@@ -166,7 +207,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
 interface ErrorNotification {
   id: number;
   message: string;
-  type: 'error' | 'warning';
+  type: 'error' | 'warning' | 'info';
 }
 
 function App() {
@@ -175,10 +216,13 @@ function App() {
   const [navigationPath, setNavigationPath] = useState<FileNode[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
+  const [scanStartTime, setScanStartTime] = useState<number | null>(null);
   const [hoveredNode, setHoveredNode] = useState<FileNode | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [filterType, setFilterType] = useState<FileType | null>(null);
   const [searchText, setSearchText] = useState("");
+  const [useRegex, setUseRegex] = useState(false); // Enable regex search mode
+  const [regexError, setRegexError] = useState<string | null>(null); // Invalid regex feedback
   const [minSizeFilter, setMinSizeFilter] = useState<number>(0); // in bytes
   const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
@@ -203,7 +247,34 @@ function App() {
   const [bgIndex, setBgIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [showDuplicates, setShowDuplicates] = useState(false);
+  const [showCleanable, setShowCleanable] = useState(false);
+  const [showScanCompare, setShowScanCompare] = useState(false);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [showSettings, setShowSettings] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [lastDeleted, setLastDeleted] = useState<DeletedItem | null>(null);
+  const [showUndoNotification, setShowUndoNotification] = useState(false);
+  const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragCounter = useRef(0);
+
+  // Get settings from context
+  const { settings: appSettings, updateSettings } = useSettings();
+
+  // Create a size formatter that uses the current settings
+  const formatSizeWithUnit = useCallback((bytes: number) => {
+    return formatSize(bytes, appSettings.size_unit);
+  }, [appSettings.size_unit]);
+
+  // Apply default theme from settings on startup
+  useEffect(() => {
+    if (appSettings.default_theme) {
+      const theme = themeList.find(t => t.id === appSettings.default_theme);
+      if (theme) {
+        applyTheme(theme);
+      }
+    }
+  }, []); // Only run once on mount
 
   // Anime background images
   const backgrounds = [
@@ -221,7 +292,7 @@ function App() {
     invoke<ScanHistoryEntry[]>("get_scan_history").then(setScanHistory).catch(console.error);
   }, []);
 
-  const showError = useCallback((message: string, type: 'error' | 'warning' = 'error') => {
+  const addNotification = useCallback((message: string, type: 'error' | 'warning' | 'info') => {
     const id = ++errorIdRef.current;
     setErrors(prev => [...prev, { id, message, type }]);
     // Auto-dismiss after 5 seconds
@@ -229,6 +300,10 @@ function App() {
       setErrors(prev => prev.filter(e => e.id !== id));
     }, 5000);
   }, []);
+
+  const showError = useCallback((message: string) => addNotification(message, 'error'), [addNotification]);
+  const showWarning = useCallback((message: string) => addNotification(message, 'warning'), [addNotification]);
+  const showInfo = useCallback((message: string) => addNotification(message, 'info'), [addNotification]);
 
   const dismissError = useCallback((id: number) => {
     setErrors(prev => prev.filter(e => e.id !== id));
@@ -298,6 +373,8 @@ function App() {
       height: container.clientHeight,
     };
 
+    // Update container size for virtualization
+    setContainerSize({ width: bounds.width, height: bounds.height });
     const rects = layoutTreemap(currentNode, bounds);
     setTreemapRects(rects);
 
@@ -309,6 +386,7 @@ function App() {
         width: container.clientWidth,
         height: container.clientHeight,
       };
+      setContainerSize({ width: newBounds.width, height: newBounds.height });
       setTreemapRects(layoutTreemap(currentNode, newBounds));
     });
 
@@ -350,24 +428,28 @@ function App() {
         const info = await invoke<DiskSpaceInfo>("get_disk_info", { path });
         setDiskInfo(info);
       } catch (e) {
-        showError(`Failed to get disk info: ${e}`, 'warning');
+        showWarning(`Failed to get disk info: ${e}`);
       }
 
-      // Start scanning (use_cache: false to force rescan)
+      // Start scanning - use cache based on settings unless forced
+      const useCache = !forceRescan && appSettings.enable_cache;
       setIsScanning(true);
       setProgress(null);
+      setScanStartTime(Date.now());
       const result = await invoke<FileNode | null>("scan_directory", {
         path,
-        use_cache: !forceRescan,
+        use_cache: useCache,
       });
       if (result) {
         setRootNode(result);
         setCurrentNode(result);
         setNavigationPath([]);
       }
+      setScanStartTime(null);
       setIsScanning(false);
     } catch (error) {
       showError(`Scan failed: ${error}`);
+      setScanStartTime(null);
       setIsScanning(false);
     }
   };
@@ -382,6 +464,7 @@ function App() {
 
   const handleCancelScan = async () => {
     await invoke("cancel_scan");
+    setScanStartTime(null);
     setIsScanning(false);
   };
 
@@ -518,10 +601,10 @@ function App() {
       if (path) {
         await scanPath(path, false);
       } else {
-        showError("Unable to get folder path. Please use the Open Folder button instead.", "warning");
+        showWarning("Unable to get folder path. Please use the Open Folder button instead.");
       }
     }
-  }, [isScanning, showError]);
+  }, [isScanning, showWarning]);
 
   // Reset zoom/pan when navigating
   useEffect(() => {
@@ -609,23 +692,103 @@ function App() {
     setContextMenu(null);
   };
 
-  const handlePreviewFile = async (path: string) => {
+  // Preview file using Quick Look (for future keyboard shortcut integration)
+  const _handlePreviewFile = async (path: string) => {
     try {
       await invoke("preview_file", { path });
     } catch (e) {
       showError(`Failed to preview file: ${e}`);
     }
   };
+  void _handlePreviewFile; // Suppress unused warning
 
   const handleMoveToTrash = async (path: string) => {
     try {
-      await invoke("move_to_trash", { path });
+      // move_to_trash now returns the deleted item info
+      const deletedItem = await invoke<DeletedItem>("move_to_trash", { path });
       setContextMenu(null);
+
+      // Show undo notification
+      setLastDeleted(deletedItem);
+      setShowUndoNotification(true);
+
+      // Clear previous timeout and set new one
+      if (undoTimeoutRef.current) {
+        clearTimeout(undoTimeoutRef.current);
+      }
+      undoTimeoutRef.current = setTimeout(() => {
+        setShowUndoNotification(false);
+      }, 8000); // 8 seconds to undo
+
+      // Update tree locally instead of rescanning
+      if (rootNode) {
+        const removeNodeFromTree = (node: FileNode, targetPath: string): FileNode | null => {
+          // If this node is the target, return null to remove it
+          if (node.path === targetPath) {
+            return null;
+          }
+          // If this node has children, filter them
+          if (node.children && node.children.length > 0) {
+            const newChildren = node.children
+              .map(child => removeNodeFromTree(child, targetPath))
+              .filter((child): child is FileNode => child !== null);
+
+            // Recalculate size
+            const removedSize = deletedItem.size;
+            return {
+              ...node,
+              children: newChildren,
+              size: node.size - removedSize,
+              file_count: node.file_count - (deletedItem.is_dir ? 0 : 1),
+              dir_count: node.dir_count - (deletedItem.is_dir ? 1 : 0),
+            };
+          }
+          return node;
+        };
+
+        const updatedRoot = removeNodeFromTree(rootNode, path);
+        if (updatedRoot) {
+          setRootNode(updatedRoot);
+          // Update currentNode if needed
+          if (currentNode) {
+            const updatedCurrent = removeNodeFromTree(currentNode, path);
+            if (updatedCurrent) {
+              setCurrentNode(updatedCurrent);
+            }
+          }
+        }
+        // Clear selection if deleted item was selected
+        if (selectedIndex >= 0) {
+          setSelectedIndex(-1);
+        }
+      }
+    } catch (e) {
+      showError(`Failed to move to trash: ${e}`);
+      setContextMenu(null);
+    }
+  };
+
+  // Undo deletion handler
+  const handleUndo = async () => {
+    if (!lastDeleted) return;
+
+    try {
+      await invoke<DeletedItem>("undo_delete");
+      setShowUndoNotification(false);
+      setLastDeleted(null);
+
+      // Clear timeout
+      if (undoTimeoutRef.current) {
+        clearTimeout(undoTimeoutRef.current);
+        undoTimeoutRef.current = null;
+      }
+
       // Rescan to update
       if (rootNode) {
         setIsScanning(true);
         const result = await invoke<FileNode | null>("scan_directory", {
           path: rootNode.path,
+          useCache: false,
         });
         if (result) {
           setRootNode(result);
@@ -634,24 +797,51 @@ function App() {
         }
         setIsScanning(false);
       }
+
+      showInfo(`Restored "${lastDeleted.name}"`);
     } catch (e) {
-      showError(`Failed to move to trash: ${e}`);
-      setContextMenu(null);
+      showError(`Failed to undo: ${e}`);
     }
   };
+
+  // Create compiled regex for search (memoized to avoid recompilation)
+  const searchRegex = useMemo(() => {
+    if (!searchText || !useRegex) return null;
+    try {
+      setRegexError(null);
+      return new RegExp(searchText, "i");
+    } catch (e) {
+      setRegexError(e instanceof Error ? e.message : "Invalid regex");
+      return null;
+    }
+  }, [searchText, useRegex]);
 
   // Filter rects - memoized to avoid recalculation on every render
   const filteredRects = useMemo(() => {
     const lowerSearchText = searchText.toLowerCase();
     return treemapRects.filter((rect) => {
       if (filterType && getFileType(rect.node) !== filterType) return false;
-      if (searchText && !rect.node.name.toLowerCase().includes(lowerSearchText)) {
-        return false;
+      if (searchText) {
+        if (useRegex) {
+          // Regex search mode
+          if (searchRegex && !searchRegex.test(rect.node.name)) {
+            return false;
+          }
+          // If regex is invalid, don't filter (show all)
+          if (!searchRegex && regexError) {
+            return true;
+          }
+        } else {
+          // Plain text search
+          if (!rect.node.name.toLowerCase().includes(lowerSearchText)) {
+            return false;
+          }
+        }
       }
       if (minSizeFilter > 0 && rect.node.size < minSizeFilter) return false;
       return true;
     });
-  }, [treemapRects, filterType, searchText, minSizeFilter]);
+  }, [treemapRects, filterType, searchText, useRegex, searchRegex, regexError, minSizeFilter]);
 
   // Compute search match indices (indices into filteredRects that match the search text)
   const searchMatchIndices = useMemo(() => {
@@ -659,9 +849,26 @@ function App() {
     const lowerSearchText = searchText.toLowerCase();
     return filteredRects
       .map((rect, index) => ({ rect, index }))
-      .filter(({ rect }) => rect.node.name.toLowerCase().includes(lowerSearchText))
+      .filter(({ rect }) => {
+        if (useRegex) {
+          return searchRegex ? searchRegex.test(rect.node.name) : false;
+        }
+        return rect.node.name.toLowerCase().includes(lowerSearchText);
+      })
       .map(({ index }) => index);
-  }, [filteredRects, searchText]);
+  }, [filteredRects, searchText, useRegex, searchRegex]);
+
+  // Virtualize rects - only render cells visible in the viewport
+  // This significantly improves performance with large treemaps
+  const { visibleRects, visibleIndices } = useVirtualizedRects({
+    rects: filteredRects,
+    containerWidth: containerSize.width,
+    containerHeight: containerSize.height,
+    zoom,
+    pan,
+    overscan: 150, // Pre-render cells 150px outside viewport
+    enabled: filteredRects.length > 100, // Only virtualize when there are many cells
+  });
 
   // Reset search match index when search text changes or matches change
   useEffect(() => {
@@ -724,6 +931,29 @@ function App() {
         e.preventDefault();
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
+        return;
+      }
+
+      // Cmd+, to open settings
+      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+        e.preventDefault();
+        setShowSettings(true);
+        return;
+      }
+
+      // Cmd+Z to undo last deletion
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        if (lastDeleted && showUndoNotification) {
+          e.preventDefault();
+          handleUndo();
+          return;
+        }
+      }
+
+      // ? or Cmd+/ to show keyboard shortcuts
+      if (e.key === '?' || ((e.metaKey || e.ctrlKey) && e.key === '/')) {
+        e.preventDefault();
+        setShowShortcuts(true);
         return;
       }
 
@@ -865,11 +1095,16 @@ function App() {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      {/* Skip link for keyboard users */}
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
+
       {/* Drag and Drop Overlay */}
       {isDragging && (
-        <div className="drop-overlay">
+        <div className="drop-overlay" aria-live="polite">
           <div className="drop-overlay-content">
-            <span className="drop-overlay-icon">📁</span>
+            <span className="drop-overlay-icon" aria-hidden="true">📁</span>
             <span className="drop-overlay-text">Drop folder to scan</span>
           </div>
         </div>
@@ -1054,6 +1289,28 @@ function App() {
           </button>
         )}
 
+        {/* Cleanable Files button */}
+        {rootNode && !isScanning && (
+          <button
+            className={`toolbar-btn cleanable-btn${showCleanable ? " active" : ""}`}
+            onClick={() => setShowCleanable(!showCleanable)}
+            title="Find cleanable files (node_modules, caches, etc.)"
+          >
+            <span aria-hidden="true">🧹</span> Clean
+          </button>
+        )}
+
+        {/* Scan Compare button */}
+        {rootNode && !isScanning && (
+          <button
+            className={`toolbar-btn compare-btn${showScanCompare ? " active" : ""}`}
+            onClick={() => setShowScanCompare(!showScanCompare)}
+            title="Compare scan snapshots over time"
+          >
+            <span aria-hidden="true">📸</span> Snapshots
+          </button>
+        )}
+
         <div className="search-box">
           <span aria-hidden="true">&#128269;</span>
           <label htmlFor="file-search" className="visually-hidden">Search files</label>
@@ -1061,7 +1318,7 @@ function App() {
             ref={searchInputRef}
             id="file-search"
             type="text"
-            placeholder="Search files... (Cmd+F)"
+            placeholder={useRegex ? "Regex pattern... (Cmd+F)" : "Search files... (Cmd+F)"}
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
             onKeyDown={(e) => {
@@ -1074,9 +1331,26 @@ function App() {
                 }
               }
             }}
-            aria-label="Search files by name"
+            aria-label={useRegex ? "Search files with regex" : "Search files by name"}
+            className={regexError ? "has-error" : ""}
           />
-          {searchText && searchMatchIndices.length > 0 && (
+          {/* Regex toggle button */}
+          <button
+            className={`search-regex-btn${useRegex ? " active" : ""}${regexError ? " error" : ""}`}
+            onClick={() => setUseRegex(!useRegex)}
+            title={useRegex ? "Disable regex mode (.*)" : "Enable regex mode (.*)"}
+            aria-label={useRegex ? "Disable regular expression mode" : "Enable regular expression mode"}
+            aria-pressed={useRegex}
+          >
+            .*
+          </button>
+          {/* Regex error indicator */}
+          {regexError && (
+            <span className="search-regex-error" title={regexError}>
+              ⚠️
+            </span>
+          )}
+          {searchText && searchMatchIndices.length > 0 && !regexError && (
             <div className="search-nav">
               <span className="search-count">
                 {currentSearchMatchIndex + 1}/{searchMatchIndices.length}
@@ -1099,7 +1373,7 @@ function App() {
               </button>
             </div>
           )}
-          {searchText && searchMatchIndices.length === 0 && (
+          {searchText && searchMatchIndices.length === 0 && !regexError && (
             <span className="search-no-results">No results</span>
           )}
           {searchText && (
@@ -1132,6 +1406,24 @@ function App() {
             </button>
           )}
         </div>
+
+        {/* Settings button */}
+        <button
+          className="toolbar-btn settings-btn"
+          onClick={() => setShowSettings(true)}
+          title="Settings (Cmd+,)"
+        >
+          <span aria-hidden="true">⚙️</span>
+        </button>
+
+        {/* Help button */}
+        <button
+          className="toolbar-btn help-btn"
+          onClick={() => setShowShortcuts(true)}
+          title="Keyboard Shortcuts (?)"
+        >
+          <span aria-hidden="true">?</span>
+        </button>
 
         <ThemeSwitcher />
       </div>
@@ -1186,15 +1478,15 @@ function App() {
           <div className="disk-overview-stats">
             <div className="disk-overview-stat">
               <span className="disk-overview-label">Disk Total</span>
-              <span className="disk-overview-value">{formatSize(diskInfo.total_bytes)}</span>
+              <span className="disk-overview-value">{formatSizeWithUnit(diskInfo.total_bytes)}</span>
             </div>
             <div className="disk-overview-stat">
               <span className="disk-overview-label">Disk Used</span>
-              <span className="disk-overview-value disk-used">{formatSize(diskInfo.used_bytes)}</span>
+              <span className="disk-overview-value disk-used">{formatSizeWithUnit(diskInfo.used_bytes)}</span>
             </div>
             <div className="disk-overview-stat">
               <span className="disk-overview-label">Scanned</span>
-              <span className="disk-overview-value disk-scanned">{formatSize(rootNode.size)}</span>
+              <span className="disk-overview-value disk-scanned">{formatSizeWithUnit(rootNode.size)}</span>
             </div>
             <div className="disk-overview-stat">
               <span className="disk-overview-label">Scanned %</span>
@@ -1202,7 +1494,7 @@ function App() {
             </div>
             <div className="disk-overview-stat">
               <span className="disk-overview-label">Available</span>
-              <span className="disk-overview-value disk-available">{formatSize(diskInfo.available_bytes)}</span>
+              <span className="disk-overview-value disk-available">{formatSizeWithUnit(diskInfo.available_bytes)}</span>
             </div>
           </div>
         </div>
@@ -1254,11 +1546,29 @@ function App() {
         />
       )}
 
+      {/* Cleanable Files Panel */}
+      {showCleanable && rootNode && !isScanning && (
+        <CleanableFilesPanel
+          scanPath={rootNode.path}
+          onClose={() => setShowCleanable(false)}
+          onShowInFinder={handleShowInFinder}
+          onMoveToTrash={handleMoveToTrash}
+        />
+      )}
+
+      {/* Scan Compare Panel */}
+      {showScanCompare && rootNode && !isScanning && (
+        <ScanComparePanel
+          scanPath={rootNode.path}
+          onClose={() => setShowScanCompare(false)}
+        />
+      )}
+
       {/* Main Content */}
-      <div className="main-content">
+      <main id="main-content" className="main-content" role="main" tabIndex={-1}>
         {!rootNode && !isScanning && (
           <div className="welcome">
-            <div className="welcome-icon">&#128193;</div>
+            <div className="welcome-icon" aria-hidden="true">&#128193;</div>
             <h1>SpaceView</h1>
             <p>Visualize your disk space usage</p>
             <button className="welcome-btn" onClick={handleOpenFolder}>
@@ -1281,7 +1591,7 @@ function App() {
                         {entry.scan_path.split("/").pop() || entry.scan_path}
                       </div>
                       <div className="history-meta">
-                        <span className="history-size">{formatSize(entry.total_size)}</span>
+                        <span className="history-size">{formatSizeWithUnit(entry.total_size)}</span>
                         <span className="history-time">{formatDate(entry.scanned_at)}</span>
                       </div>
                     </button>
@@ -1325,11 +1635,16 @@ function App() {
               </div>
               <div className="scanning-stat">
                 <span className="scanning-stat-value">
-                  {formatSize(progress?.total_size ?? 0)}
+                  {formatSizeWithUnit(progress?.total_size ?? 0)}
                 </span>
                 <span className="scanning-stat-label">Total Size</span>
               </div>
             </div>
+
+            {/* Performance stats */}
+            {scanStartTime && progress && (
+              <ScanPerformanceStats startTime={scanStartTime} progress={progress} />
+            )}
 
             {progress?.current_path && (
               <div className="scanning-path">
@@ -1365,34 +1680,41 @@ function App() {
                 transformOrigin: "center center",
               }}
             >
-              {filteredRects.map((rect, index) => (
+              {visibleRects.map((rect, visibleIdx) => {
+                // Map visible index back to original filteredRects index
+                const originalIndex = visibleIndices[visibleIdx];
+                return (
                 rect.isContainer ? (
                   <TreemapContainerCell
                     key={rect.id + "-container"}
                     rect={rect}
-                    isSelected={index === selectedIndex}
+                    isSelected={originalIndex === selectedIndex}
                     onHover={handleCellHover}
                     onLeave={handleCellLeave}
                     onNavigate={navigateTo}
                     onContextMenu={handleContextMenu}
-                    onSelect={() => setSelectedIndex(index)}
+                    onSelect={() => setSelectedIndex(originalIndex)}
+                    sizeUnit={appSettings.size_unit}
                   />
                 ) : (
                   <TreemapLeafCell
                     key={rect.id}
                     rect={rect}
-                    isSelected={index === selectedIndex}
-                    isSearchMatch={searchMatchIndices.includes(index)}
-                    isCurrentSearchMatch={searchMatchIndices[currentSearchMatchIndex] === index}
+                    isSelected={originalIndex === selectedIndex}
+                    isSearchMatch={searchMatchIndices.includes(originalIndex)}
+                    isCurrentSearchMatch={searchMatchIndices[currentSearchMatchIndex] === originalIndex}
                     searchText={searchText}
+                    useRegex={useRegex}
                     onHover={handleCellHover}
                     onLeave={handleCellLeave}
                     onNavigate={navigateTo}
                     onContextMenu={handleContextMenu}
-                    onSelect={() => setSelectedIndex(index)}
+                    onSelect={() => setSelectedIndex(originalIndex)}
+                    sizeUnit={appSettings.size_unit}
                   />
                 )
-              ))}
+                );
+              })}
             </div>
             {zoom !== 1 && (
               <button className="zoom-reset-btn" onClick={resetZoomPan} title="Reset zoom (double-click)">
@@ -1401,7 +1723,7 @@ function App() {
             )}
           </div>
         )}
-      </div>
+      </main>
 
       {/* Status Bar */}
       {(hoveredNode || currentNode) && (
@@ -1410,7 +1732,7 @@ function App() {
             {hoveredNode?.path || currentNode?.path}
           </span>
           <span className="status-bar-size">
-            {formatSize(hoveredNode?.size || currentNode?.size || 0)}
+            {formatSizeWithUnit(hoveredNode?.size || currentNode?.size || 0)}
           </span>
           {(hoveredNode || currentNode)?.is_dir && (
             <span>
@@ -1427,38 +1749,55 @@ function App() {
           className="context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
+          role="menu"
+          aria-label={`Actions for ${contextMenu.node.name}`}
         >
           <div
             className="context-menu-item"
             onClick={() => handleShowInFinder(contextMenu.node.path)}
+            role="menuitem"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && handleShowInFinder(contextMenu.node.path)}
           >
-            <span>&#128193;</span> Show in Finder
+            <span aria-hidden="true">&#128193;</span> Show in Finder
           </div>
           <div
             className="context-menu-item"
             onClick={() => handleOpenFile(contextMenu.node.path)}
+            role="menuitem"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && handleOpenFile(contextMenu.node.path)}
           >
-            <span>&#128194;</span> Open
+            <span aria-hidden="true">&#128194;</span> Open
           </div>
-          <div className="context-menu-divider" />
+          <div className="context-menu-divider" role="separator" />
           <div
             className="context-menu-item"
             onClick={() => handleCopyPath(contextMenu.node.path)}
+            role="menuitem"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && handleCopyPath(contextMenu.node.path)}
           >
-            <span>&#128203;</span> Copy Path
+            <span aria-hidden="true">&#128203;</span> Copy Path
           </div>
           <div
             className="context-menu-item"
             onClick={() => handleOpenInTerminal(contextMenu.node.path)}
+            role="menuitem"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && handleOpenInTerminal(contextMenu.node.path)}
           >
-            <span>&#9002;</span> Open in Terminal
+            <span aria-hidden="true">&#9002;</span> Open in Terminal
           </div>
-          <div className="context-menu-divider" />
+          <div className="context-menu-divider" role="separator" />
           <div
             className="context-menu-item danger"
             onClick={() => handleMoveToTrash(contextMenu.node.path)}
+            role="menuitem"
+            tabIndex={0}
+            onKeyDown={(e) => e.key === 'Enter' && handleMoveToTrash(contextMenu.node.path)}
           >
-            <span>&#128465;</span> Move to Trash
+            <span aria-hidden="true">&#128465;</span> Move to Trash
           </div>
         </div>
       )}
@@ -1477,7 +1816,7 @@ function App() {
           </div>
           <div className="tooltip-row">
             <span>Size</span>
-            <span>{formatSize(hoveredNode.size)}</span>
+            <span>{formatSizeWithUnit(hoveredNode.size)}</span>
           </div>
           {hoveredNode.modified_at && (
             <div className="tooltip-row">
@@ -1533,6 +1872,26 @@ function App() {
           ))}
         </div>
       )}
+
+      {/* Settings Panel */}
+      <SettingsPanel
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        onSettingsChange={updateSettings}
+        onShowOnboarding={() => setShowOnboarding(true)}
+      />
+
+      {/* Keyboard Shortcuts Panel */}
+      <KeyboardShortcutsPanel
+        isOpen={showShortcuts}
+        onClose={() => setShowShortcuts(false)}
+      />
+
+      {/* Onboarding Guide */}
+      <OnboardingGuide
+        onComplete={() => setShowOnboarding(false)}
+        forceShow={showOnboarding}
+      />
     </div>
   );
 }
