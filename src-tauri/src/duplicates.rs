@@ -53,6 +53,8 @@ pub struct DuplicateResult {
     pub total_wasted_bytes: u64,
     pub files_scanned: u64,
     pub files_hashed: u64,
+    pub full_hash_files: u64,
+    pub partial_collision_groups: u64,
     pub time_ms: u64,
 }
 
@@ -200,10 +202,14 @@ impl DuplicateFinder {
         });
 
         let files_hashed = Arc::new(AtomicU64::new(0));
+        let full_hash_files = Arc::new(AtomicU64::new(0));
+        let partial_collision_groups = Arc::new(AtomicU64::new(0));
         let duplicate_groups: Arc<DashMap<String, (u64, Vec<PathBuf>)>> = Arc::new(DashMap::new());
         let cancelled = self.is_cancelled.clone();
         let app = app_handle.clone();
         let hashed = files_hashed.clone();
+        let full_hashed = full_hash_files.clone();
+        let partial_collisions = partial_collision_groups.clone();
 
         // Process each size group in parallel
         candidate_groups.par_iter().for_each(|(size, paths)| {
@@ -239,7 +245,14 @@ impl DuplicateFinder {
                 })
                 .collect();
 
-            for (hash, files) in group_duplicates_for_hashes(*size, hashes) {
+            let group_result = group_duplicates_for_hashes(*size, hashes);
+            if group_result.partial_collision_groups > 0 {
+                partial_collisions.fetch_add(group_result.partial_collision_groups, Ordering::Relaxed);
+            }
+            if group_result.full_hash_files > 0 {
+                full_hashed.fetch_add(group_result.full_hash_files, Ordering::Relaxed);
+            }
+            for (hash, files) in group_result.groups {
                 duplicate_groups.insert(hash, (*size, files));
             }
         });
@@ -301,15 +314,23 @@ impl DuplicateFinder {
             total_wasted_bytes: total_wasted,
             files_scanned: total_files,
             files_hashed: files_hashed_count,
+            full_hash_files: full_hash_files.load(Ordering::Relaxed),
+            partial_collision_groups: partial_collision_groups.load(Ordering::Relaxed),
             time_ms: elapsed,
         })
     }
 }
 
+struct HashGroupResult {
+    groups: Vec<(String, Vec<PathBuf>)>,
+    full_hash_files: u64,
+    partial_collision_groups: u64,
+}
+
 fn group_duplicates_for_hashes(
     size: u64,
     hashes: Vec<(PathBuf, Option<String>)>,
-) -> Vec<(String, Vec<PathBuf>)> {
+) -> HashGroupResult {
     let mut hash_groups: std::collections::HashMap<String, Vec<PathBuf>> =
         std::collections::HashMap::new();
 
@@ -320,18 +341,27 @@ fn group_duplicates_for_hashes(
     }
 
     if size <= PARTIAL_HASH_SIZE * 2 {
-        return hash_groups
+        let groups = hash_groups
             .into_iter()
             .filter(|(_, files)| files.len() > 1)
             .collect();
+        return HashGroupResult {
+            groups,
+            full_hash_files: 0,
+            partial_collision_groups: 0,
+        };
     }
 
     let mut full_groups: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    let mut full_hash_files: u64 = 0;
+    let mut partial_collision_groups: u64 = 0;
     for (_, files) in hash_groups {
         if files.len() <= 1 {
             continue;
         }
 
+        partial_collision_groups += 1;
+        full_hash_files += files.len() as u64;
         let mut full_hash_groups: std::collections::HashMap<String, Vec<PathBuf>> =
             std::collections::HashMap::new();
         for path in files {
@@ -347,7 +377,11 @@ fn group_duplicates_for_hashes(
         }
     }
 
-    full_groups
+    HashGroupResult {
+        groups: full_groups,
+        full_hash_files,
+        partial_collision_groups,
+    }
 }
 
 fn compute_partial_hash(path: &Path, size: u64) -> Option<String> {
@@ -439,7 +473,7 @@ mod tests {
         assert_eq!(hashes[0].1, hashes[1].1, "partial hashes should match");
 
         let groups = group_duplicates_for_hashes(size, hashes);
-        assert!(groups.is_empty(), "full hash should avoid false duplicates");
+        assert!(groups.groups.is_empty(), "full hash should avoid false duplicates");
 
         let _ = fs::remove_dir_all(dir);
     }

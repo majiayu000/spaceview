@@ -113,6 +113,8 @@ export interface DuplicateResult {
   total_wasted_bytes: number;
   files_scanned: number;
   files_hashed: number;
+  full_hash_files: number;
+  partial_collision_groups: number;
   time_ms: number;
 }
 
@@ -165,6 +167,8 @@ export interface CompareResult {
   left_only_size: number;
   right_only_size: number;
   different_size: number;
+  type_conflict_count: number;
+  type_conflict_size: number;
   time_ms: number;
 }
 

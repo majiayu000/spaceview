@@ -208,6 +208,22 @@ export function DuplicatesPanel({
                 {formatSizeWithUnit(result.total_wasted_bytes)}
               </span>
             </div>
+            {result.partial_collision_groups > 0 && (
+              <div className="summary-item">
+                <span className="summary-label">Partial collisions:</span>
+                <span className="summary-value">
+                  {result.partial_collision_groups.toLocaleString()}
+                </span>
+              </div>
+            )}
+            {result.full_hash_files > 0 && (
+              <div className="summary-item">
+                <span className="summary-label">Full-hashed files:</span>
+                <span className="summary-value">
+                  {result.full_hash_files.toLocaleString()}
+                </span>
+              </div>
+            )}
             <div className="summary-item">
               <span className="summary-label">Time:</span>
               <span className="summary-value">{(result.time_ms / 1000).toFixed(1)}s</span>

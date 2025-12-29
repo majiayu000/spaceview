@@ -35,6 +35,8 @@ describe("ComparePanel", () => {
       left_only_size: 0,
       right_only_size: 0,
       different_size: 0,
+      type_conflict_count: 1,
+      type_conflict_size: 1024,
       time_ms: 12,
     };
 

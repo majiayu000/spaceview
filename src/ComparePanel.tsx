@@ -321,6 +321,19 @@ export function ComparePanel({
               <span className="summary-label">Different:</span>
               <span className="summary-value">{result.different.length}</span>
             </div>
+            {result.type_conflict_count > 0 && (
+              <div className="summary-item">
+                <span className="summary-label">Type conflicts:</span>
+                <span className="summary-value">
+                  {result.type_conflict_count.toLocaleString()}
+                  {result.type_conflict_size > 0 && (
+                    <span className="summary-subvalue">
+                      {" "}({formatSize(result.type_conflict_size)})
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
             <div className="summary-item identical">
               <span className="summary-label">Identical:</span>
               <span className="summary-value">{result.identical_count}</span>

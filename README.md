@@ -83,6 +83,19 @@ pnpm tauri build
    - Use **Search** to find files by name
 5. Switch themes using the dropdown in the top-right corner
 
+## Ignore Patterns
+
+SpaceView supports `.spaceignore` files at the scan root. The syntax matches
+gitignore-style patterns (path-aware, case-sensitive on most filesystems).
+
+Example:
+```text
+# Ignore build output
+**/dist/
+**/build/
+*.log
+```
+
 ## Tech Stack
 
 - **Frontend**: React 19 + TypeScript + Vite

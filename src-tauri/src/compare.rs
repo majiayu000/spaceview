@@ -64,6 +64,8 @@ pub struct CompareResult {
     pub left_only_size: u64,
     pub right_only_size: u64,
     pub different_size: u64,               // Size difference in changed files
+    pub type_conflict_count: u64,
+    pub type_conflict_size: u64,
     pub time_ms: u64,
 }
 
@@ -276,7 +278,7 @@ impl DirectoryComparer {
         let cancelled = self.is_cancelled.clone();
         let app = app_handle.clone();
 
-        let comparison_results: Vec<(String, bool, u64, u64)> = common_keys
+        let comparison_results: Vec<(String, CompareOutcome, u64, u64)> = common_keys
             .par_iter()
             .filter_map(|key| {
                 if cancelled.load(Ordering::Acquire) {
@@ -322,10 +324,18 @@ impl DirectoryComparer {
         // Split into different and identical
         let mut different: Vec<DiffFile> = Vec::new();
         let mut identical_count: u64 = 0;
+        let mut type_conflict_count: u64 = 0;
+        let mut type_conflict_size: u64 = 0;
 
-        for (key, is_identical, left_size, right_size) in comparison_results {
-            if is_identical {
+        for (key, outcome, left_size, right_size) in comparison_results {
+            if outcome.is_identical {
                 identical_count += 1;
+                continue;
+            }
+
+            if outcome.is_type_conflict {
+                type_conflict_count += 1;
+                type_conflict_size += left_size.max(right_size);
             } else if let (Some(left_entry), Some(right_entry)) =
                 (left_files.get(&key), right_files.get(&key))
             {
@@ -365,7 +375,8 @@ impl DirectoryComparer {
         let right_only_size: u64 = right_only.iter().map(|f| f.size).sum();
         let different_size: u64 = different.iter()
             .map(|f| (f.left_size as i64 - f.right_size as i64).unsigned_abs())
-            .sum();
+            .sum::<u64>()
+            .saturating_add(type_conflict_size);
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -393,9 +404,16 @@ impl DirectoryComparer {
             left_only_size,
             right_only_size,
             different_size,
+            type_conflict_count,
+            type_conflict_size,
             time_ms: elapsed,
         })
     }
+}
+
+struct CompareOutcome {
+    is_identical: bool,
+    is_type_conflict: bool,
 }
 
 fn compare_entry_pair(
@@ -405,20 +423,29 @@ fn compare_entry_pair(
     right_path: &Path,
     right_size: u64,
     right_is_dir: bool,
-) -> Option<bool> {
+) -> Option<CompareOutcome> {
     if left_is_dir && right_is_dir {
         return None;
     }
 
     if left_is_dir != right_is_dir {
-        return Some(false);
+        return Some(CompareOutcome {
+            is_identical: false,
+            is_type_conflict: true,
+        });
     }
 
     if left_size != right_size {
-        return Some(false);
+        return Some(CompareOutcome {
+            is_identical: false,
+            is_type_conflict: false,
+        });
     }
 
-    Some(are_files_identical(left_path, right_path, left_size))
+    Some(CompareOutcome {
+        is_identical: are_files_identical(left_path, right_path, left_size),
+        is_type_conflict: false,
+    })
 }
 
 fn are_files_identical(left_path: &Path, right_path: &Path, size: u64) -> bool {
@@ -546,7 +573,13 @@ mod tests {
             true,
         );
 
-        assert_eq!(comparison, Some(false));
+        assert!(matches!(
+            comparison,
+            Some(CompareOutcome {
+                is_identical: false,
+                is_type_conflict: true
+            })
+        ));
 
         let _ = fs::remove_dir_all(dir);
     }

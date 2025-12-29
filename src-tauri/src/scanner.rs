@@ -319,13 +319,16 @@ impl Scanner {
                     }
                 }
 
-                // Get metadata for inode tracking, size, and modification time
-                let metadata = entry.metadata();
-                let (file_size, inode_key, modified_at) = if let Ok(ref meta) = metadata {
+                // Get metadata for inode tracking, size, and modification time (files only).
+                let (file_size, inode_key, modified_at) = if is_dir {
+                    (0, None, None)
+                } else if let Ok(meta) = entry.metadata() {
                     let dev = meta.dev();
                     let ino = meta.ino();
-                    let size = if is_dir { 0 } else { meta.len() };
-                    let mtime = meta.modified().ok()
+                    let size = meta.len();
+                    let mtime = meta
+                        .modified()
+                        .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs());
                     (size, Some((dev, ino)), mtime)

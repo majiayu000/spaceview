@@ -2896,6 +2896,12 @@ body.has-anime-bg {
   color: var(--text-primary);
 }
 
+.summary-subvalue {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
 .summary-item.wasted .summary-value {
   color: var(--error);
 }
