@@ -1,13 +1,12 @@
-//! Scan result caching for instant reload
+//! Scan result caching for instant reload (SQLite-backed).
 //!
-//! Caches scan results to disk for near-instant loading on subsequent visits.
-//! Cache is stored in ~/.cache/spaceview/ (macOS/Linux) or AppData (Windows).
+//! Stores scan snapshots in a local SQLite database to enable fast reloads
+//! and incremental updates without re-walking the filesystem.
 
 use crate::scanner::FileNode;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +19,9 @@ pub struct CachedScan {
     pub scan_path: String,
     /// Timestamp when scan was performed (unix epoch seconds)
     pub scanned_at: u64,
+    /// Timestamp of last incremental update (unix epoch seconds)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_incremental_at: Option<u64>,
     /// Total files scanned
     pub total_files: u64,
     /// Total directories scanned
@@ -37,35 +39,55 @@ fn get_cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|p| p.join("spaceview"))
 }
 
-/// Generate a cache key from a path (SHA256 hash)
-fn path_to_cache_key(path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(path.as_bytes());
-    let result = hasher.finalize();
-    format!("{:x}", result)[..16].to_string() // Use first 16 hex chars
+/// Get the SQLite DB path
+fn get_db_path() -> Option<PathBuf> {
+    get_cache_dir().map(|p| p.join("spaceview.db"))
 }
 
-/// Get the cache file path for a given scan path
-fn get_cache_path(scan_path: &str) -> Option<PathBuf> {
-    let cache_dir = get_cache_dir()?;
-    let key = path_to_cache_key(scan_path);
-    Some(cache_dir.join(format!("{}.bin", key)))
+fn open_db() -> Result<Connection, String> {
+    let db_path = get_db_path().ok_or("Could not determine cache directory")?;
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    }
+
+    let conn = Connection::open(db_path)
+        .map_err(|e| format!("Failed to open cache DB: {}", e))?;
+
+    conn.execute_batch(
+        r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        CREATE TABLE IF NOT EXISTS scans (
+          scan_path TEXT PRIMARY KEY,
+          version INTEGER NOT NULL,
+          scanned_at INTEGER NOT NULL,
+          last_incremental_at INTEGER,
+          total_files INTEGER NOT NULL,
+          total_dirs INTEGER NOT NULL,
+          total_size INTEGER NOT NULL,
+          cache_size_bytes INTEGER NOT NULL,
+          tree_blob BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS delete_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scan_path TEXT NOT NULL,
+          target_path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          deleted_at INTEGER NOT NULL
+        );
+        "#,
+    )
+    .map_err(|e| format!("Failed to init cache DB: {}", e))?;
+
+    Ok(conn)
 }
 
 /// Maximum cache size (500MB) to prevent memory issues
 const MAX_CACHE_SIZE: u64 = 500 * 1024 * 1024;
 
-/// Save scan results to cache
+/// Save scan results to cache (full scan)
 pub fn save_to_cache(scan_path: &str, root: &FileNode) -> Result<PathBuf, String> {
-    let cache_dir = get_cache_dir().ok_or("Could not determine cache directory")?;
-
-    // Create cache directory if it doesn't exist
-    fs::create_dir_all(&cache_dir)
-        .map_err(|e| format!("Failed to create cache directory: {}", e))?;
-
-    let cache_path = get_cache_path(scan_path)
-        .ok_or("Could not determine cache path")?;
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("Time error: {}", e))?
@@ -78,6 +100,7 @@ pub fn save_to_cache(scan_path: &str, root: &FileNode) -> Result<PathBuf, String
         version: CACHE_VERSION,
         scan_path: scan_path.to_string(),
         scanned_at: now,
+        last_incremental_at: Some(now),
         total_files,
         total_dirs,
         total_size: root.size,
@@ -97,112 +120,222 @@ pub fn save_to_cache(scan_path: &str, root: &FileNode) -> Result<PathBuf, String
         ));
     }
 
-    // Write to file
-    fs::write(&cache_path, &serialized)
-        .map_err(|e| format!("Failed to write cache file: {}", e))?;
+    let conn = open_db()?;
+    conn.execute(
+        r#"
+        INSERT INTO scans (
+          scan_path, version, scanned_at, last_incremental_at,
+          total_files, total_dirs, total_size, cache_size_bytes, tree_blob
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(scan_path) DO UPDATE SET
+          version = excluded.version,
+          scanned_at = excluded.scanned_at,
+          last_incremental_at = excluded.last_incremental_at,
+          total_files = excluded.total_files,
+          total_dirs = excluded.total_dirs,
+          total_size = excluded.total_size,
+          cache_size_bytes = excluded.cache_size_bytes,
+          tree_blob = excluded.tree_blob
+        "#,
+        params![
+            scan_path,
+            CACHE_VERSION as i64,
+            now as i64,
+            now as i64,
+            total_files as i64,
+            total_dirs as i64,
+            root.size as i64,
+            serialized.len() as i64,
+            serialized
+        ],
+    )
+    .map_err(|e| format!("Failed to write cache DB: {}", e))?;
 
-    println!("[Cache] Saved to {:?} ({:.1} MB)", cache_path, serialized.len() as f64 / 1_048_576.0);
-    Ok(cache_path)
+    Ok(get_db_path().unwrap_or_default())
+}
+
+/// Save incremental scan update (keeps original scanned_at)
+pub fn save_incremental_update(scan_path: &str, root: &FileNode) -> Result<(), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Time error: {}", e))?
+        .as_secs();
+
+    let conn = open_db()?;
+    let scanned_at: Option<i64> = conn
+        .query_row(
+            "SELECT scanned_at FROM scans WHERE scan_path = ?1",
+            params![scan_path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read cache metadata: {}", e))?;
+
+    let scanned_at = scanned_at.unwrap_or(now as i64) as u64;
+
+    let (total_files, total_dirs) = count_items(root);
+    let cached = CachedScan {
+        version: CACHE_VERSION,
+        scan_path: scan_path.to_string(),
+        scanned_at,
+        last_incremental_at: Some(now),
+        total_files,
+        total_dirs,
+        total_size: root.size,
+        root: root.clone(),
+    };
+
+    let serialized = bincode::serialize(&cached)
+        .map_err(|e| format!("Failed to serialize cache: {}", e))?;
+
+    if serialized.len() as u64 > MAX_CACHE_SIZE {
+        return Err(format!(
+            "Cache too large ({:.1} MB > {:.0} MB limit), skipping",
+            serialized.len() as f64 / 1_048_576.0,
+            MAX_CACHE_SIZE as f64 / 1_048_576.0
+        ));
+    }
+
+    conn.execute(
+        r#"
+        INSERT INTO scans (
+          scan_path, version, scanned_at, last_incremental_at,
+          total_files, total_dirs, total_size, cache_size_bytes, tree_blob
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(scan_path) DO UPDATE SET
+          version = excluded.version,
+          scanned_at = excluded.scanned_at,
+          last_incremental_at = excluded.last_incremental_at,
+          total_files = excluded.total_files,
+          total_dirs = excluded.total_dirs,
+          total_size = excluded.total_size,
+          cache_size_bytes = excluded.cache_size_bytes,
+          tree_blob = excluded.tree_blob
+        "#,
+        params![
+            scan_path,
+            CACHE_VERSION as i64,
+            scanned_at as i64,
+            now as i64,
+            total_files as i64,
+            total_dirs as i64,
+            root.size as i64,
+            serialized.len() as i64,
+            serialized
+        ],
+    )
+    .map_err(|e| format!("Failed to write cache DB: {}", e))?;
+
+    Ok(())
 }
 
 /// Load scan results from cache
 pub fn load_from_cache(scan_path: &str) -> Result<CachedScan, String> {
-    let cache_path = get_cache_path(scan_path)
-        .ok_or("Could not determine cache path")?;
+    let conn = open_db()?;
+    let row = conn
+        .query_row(
+            r#"
+            SELECT version, scanned_at, last_incremental_at,
+                   total_files, total_dirs, total_size, tree_blob
+            FROM scans
+            WHERE scan_path = ?1
+            "#,
+            params![scan_path],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read cache DB: {}", e))?;
 
-    if !cache_path.exists() {
+    let Some((version, scanned_at, last_incremental_at, total_files, total_dirs, total_size, blob)) = row
+    else {
         return Err("Cache not found".to_string());
+    };
+
+    if version as u32 != CACHE_VERSION {
+        return Err(format!("Cache version mismatch: {} vs {}", version, CACHE_VERSION));
     }
 
-    let file = fs::File::open(&cache_path)
-        .map_err(|e| format!("Failed to open cache file: {}", e))?;
-    let reader = BufReader::new(file);
-
-    let cached: CachedScan = bincode::deserialize_from(reader)
+    let cached: CachedScan = bincode::deserialize(&blob)
         .map_err(|e| format!("Failed to deserialize cache: {}", e))?;
 
-    // Check version compatibility
-    if cached.version != CACHE_VERSION {
-        return Err(format!("Cache version mismatch: {} vs {}", cached.version, CACHE_VERSION));
-    }
-
-    println!("[Cache] Loaded from {:?}", cache_path);
-    println!("[Cache] Scanned at: {} ({} files, {} dirs, {:.2} GB)",
-        cached.scanned_at,
-        cached.total_files,
-        cached.total_dirs,
-        cached.total_size as f64 / 1_073_741_824.0
-    );
-
-    Ok(cached)
+    Ok(CachedScan {
+        version: cached.version,
+        scan_path: cached.scan_path,
+        scanned_at: scanned_at as u64,
+        last_incremental_at: last_incremental_at.map(|v| v as u64),
+        total_files: total_files as u64,
+        total_dirs: total_dirs as u64,
+        total_size: total_size as u64,
+        root: cached.root,
+    })
 }
 
 /// Check if cache exists for a path
 #[allow(dead_code)]
 pub fn has_cache(scan_path: &str) -> bool {
-    get_cache_path(scan_path)
-        .map(|p| p.exists())
-        .unwrap_or(false)
+    get_cache_info(scan_path).is_some()
 }
 
 /// Get cache info without loading the full cache
 pub fn get_cache_info(scan_path: &str) -> Option<CacheInfo> {
-    let cache_path = get_cache_path(scan_path)?;
+    let conn = open_db().ok()?;
+    let row = conn
+        .query_row(
+            r#"
+            SELECT scanned_at, last_incremental_at, cache_size_bytes
+            FROM scans
+            WHERE scan_path = ?1
+            "#,
+            params![scan_path],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()?;
 
-    if !cache_path.exists() {
-        return None;
-    }
-
-    // Get file modification time as a proxy for cache freshness
-    let metadata = fs::metadata(&cache_path).ok()?;
-    let modified = metadata.modified().ok()?;
-    let cache_time = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let cache_size = metadata.len();
+    let (scanned_at, last_incremental_at, cache_size_bytes) = row?;
+    let cached_at = last_incremental_at.unwrap_or(scanned_at);
 
     Some(CacheInfo {
-        cache_path: cache_path.to_string_lossy().to_string(),
-        cached_at: cache_time,
-        cache_size_bytes: cache_size,
+        cache_path: get_db_path()?.to_string_lossy().to_string(),
+        cached_at: cached_at as u64,
+        cache_size_bytes: cache_size_bytes as u64,
     })
 }
 
 /// Delete cache for a path
 pub fn delete_cache(scan_path: &str) -> Result<(), String> {
-    let cache_path = get_cache_path(scan_path)
-        .ok_or("Could not determine cache path")?;
-
-    if cache_path.exists() {
-        fs::remove_file(&cache_path)
-            .map_err(|e| format!("Failed to delete cache: {}", e))?;
-        println!("[Cache] Deleted {:?}", cache_path);
-    }
-
+    let conn = open_db()?;
+    conn.execute("DELETE FROM scans WHERE scan_path = ?1", params![scan_path])
+        .map_err(|e| format!("Failed to delete cache: {}", e))?;
     Ok(())
 }
 
 /// Clear all caches
 pub fn clear_all_caches() -> Result<usize, String> {
-    let cache_dir = get_cache_dir().ok_or("Could not determine cache directory")?;
-
-    if !cache_dir.exists() {
-        return Ok(0);
-    }
-
-    let mut count = 0;
-    for entry in fs::read_dir(&cache_dir)
-        .map_err(|e| format!("Failed to read cache directory: {}", e))?
-    {
-        if let Ok(entry) = entry {
-            if entry.path().extension().map(|e| e == "bin").unwrap_or(false) {
-                if fs::remove_file(entry.path()).is_ok() {
-                    count += 1;
-                }
-            }
-        }
-    }
-
-    println!("[Cache] Cleared {} cache files", count);
-    Ok(count)
+    let conn = open_db()?;
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM scans", [], |row| row.get(0))
+        .unwrap_or(0);
+    conn.execute("DELETE FROM scans", [])
+        .map_err(|e| format!("Failed to clear cache: {}", e))?;
+    let _ = conn.execute("DELETE FROM delete_log", []);
+    Ok(count as usize)
 }
 
 /// Count files and directories in a tree
@@ -244,47 +377,100 @@ pub struct ScanHistoryEntry {
 
 /// Get all cached scans as history entries
 pub fn get_scan_history() -> Vec<ScanHistoryEntry> {
-    let cache_dir = match get_cache_dir() {
-        Some(dir) => dir,
-        None => return vec![],
+    let conn = match open_db() {
+        Ok(c) => c,
+        Err(_) => return vec![],
     };
 
-    if !cache_dir.exists() {
-        return vec![];
-    }
+    let mut stmt = match conn.prepare(
+        r#"
+        SELECT scan_path, scanned_at, total_files, total_dirs, total_size, cache_size_bytes
+        FROM scans
+        ORDER BY scanned_at DESC
+        "#,
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
 
-    let mut entries: Vec<ScanHistoryEntry> = vec![];
+    let rows = match stmt.query_map([], |row| {
+        Ok(ScanHistoryEntry {
+            scan_path: row.get::<_, String>(0)?,
+            scanned_at: row.get::<_, i64>(1)? as u64,
+            total_files: row.get::<_, i64>(2)? as u64,
+            total_dirs: row.get::<_, i64>(3)? as u64,
+            total_size: row.get::<_, i64>(4)? as u64,
+            cache_size_bytes: row.get::<_, i64>(5)? as u64,
+        })
+    }) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
 
-    if let Ok(dir_entries) = fs::read_dir(&cache_dir) {
-        for entry in dir_entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "bin").unwrap_or(false) {
-                // Try to read just the header of the cache file
-                if let Ok(file) = fs::File::open(&path) {
-                    let reader = BufReader::new(file);
-                    if let Ok(cached) = bincode::deserialize_from::<_, CachedScan>(reader) {
-                        if cached.version == CACHE_VERSION {
-                            let cache_size = fs::metadata(&path)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
+    rows.filter_map(Result::ok).collect()
+}
 
-                            entries.push(ScanHistoryEntry {
-                                scan_path: cached.scan_path,
-                                scanned_at: cached.scanned_at,
-                                total_files: cached.total_files,
-                                total_dirs: cached.total_dirs,
-                                total_size: cached.total_size,
-                                cache_size_bytes: cache_size,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
+/// Log delete operation for trust UI
+pub fn log_delete(scan_path: &str, target_path: &str, size_bytes: u64) -> Result<(), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Time error: {}", e))?
+        .as_secs();
 
-    // Sort by most recent first
-    entries.sort_by(|a, b| b.scanned_at.cmp(&a.scanned_at));
+    let conn = open_db()?;
+    conn.execute(
+        r#"
+        INSERT INTO delete_log (scan_path, target_path, size_bytes, deleted_at)
+        VALUES (?1, ?2, ?3, ?4)
+        "#,
+        params![scan_path, target_path, size_bytes as i64, now as i64],
+    )
+    .map_err(|e| format!("Failed to write delete log: {}", e))?;
 
-    entries
+    Ok(())
+}
+
+/// Read recent delete log entries
+pub fn get_delete_log(scan_path: &str, limit: usize) -> Vec<DeleteLogEntry> {
+    let conn = match open_db() {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let mut stmt = match conn.prepare(
+        r#"
+        SELECT id, scan_path, target_path, size_bytes, deleted_at
+        FROM delete_log
+        WHERE scan_path = ?1
+        ORDER BY deleted_at DESC
+        LIMIT ?2
+        "#,
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let rows = match stmt.query_map(params![scan_path, limit as i64], |row| {
+        Ok(DeleteLogEntry {
+            id: row.get::<_, i64>(0)? as u64,
+            scan_path: row.get::<_, String>(1)?,
+            target_path: row.get::<_, String>(2)?,
+            size_bytes: row.get::<_, i64>(3)? as u64,
+            deleted_at: row.get::<_, i64>(4)? as u64,
+        })
+    }) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    rows.filter_map(Result::ok).collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteLogEntry {
+    pub id: u64,
+    pub scan_path: String,
+    pub target_path: String,
+    pub size_bytes: u64,
+    pub deleted_at: u64,
 }

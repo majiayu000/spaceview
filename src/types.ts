@@ -37,6 +37,7 @@ export interface CachedScan {
   version: number;
   scan_path: string;
   scanned_at: number;
+  last_incremental_at?: number;
   total_files: number;
   total_dirs: number;
   total_size: number;
@@ -50,6 +51,28 @@ export interface ScanHistoryEntry {
   total_dirs: number;
   total_size: number;
   cache_size_bytes: number;
+}
+
+export interface DeleteLogEntry {
+  id: number;
+  scan_path: string;
+  target_path: string;
+  size_bytes: number;
+  deleted_at: number;
+}
+
+export interface WatcherStatus {
+  active: boolean;
+  path: string;
+  error?: string;
+}
+
+export interface IncrementalStatus {
+  phase: "start" | "complete";
+  updated: boolean;
+  full_rescan: boolean;
+  dirty_count: number;
+  at: number;
 }
 
 export interface TreemapRect {

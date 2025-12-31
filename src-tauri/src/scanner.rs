@@ -57,6 +57,7 @@ fn get_memory_usage() -> u64 {
 const MAX_CHILDREN: usize = 200;  // Children per directory before grouping
 const MAX_DEPTH: usize = 15;      // Maximum tree depth
 const MAX_TOTAL_NODES: usize = 100_000;  // Absolute limit on total nodes in tree
+const MAX_SCANNED_NODES: usize = 1_000_000; // Hard cap to avoid exhausting RAM during walk
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
@@ -132,7 +133,7 @@ impl Scanner {
         Self { state }
     }
 
-    pub fn scan(&self, root_path: &Path, app_handle: &AppHandle) -> Option<FileNode> {
+    pub fn scan(&self, root_path: &Path, app_handle: Option<&AppHandle>) -> Option<FileNode> {
         self.state.reset();
 
         let total_start = Instant::now();
@@ -144,6 +145,7 @@ impl Scanner {
         let scanned_files = Arc::new(AtomicU64::new(0));
         let scanned_dirs = Arc::new(AtomicU64::new(0));
         let total_size = Arc::new(AtomicU64::new(0));
+        let hard_limit_hit = Arc::new(AtomicBool::new(false));
 
         // Lock-free concurrent hashmap (DashMap - no lock contention)
         let nodes: Arc<DashMap<PathBuf, TempNode>> =
@@ -156,26 +158,29 @@ impl Scanner {
         // Progress channel for UI updates
         let (progress_tx, progress_rx) = bounded::<(u64, u64, u64, String)>(100);
 
-        // Spawn progress reporter thread
-        let app = app_handle.clone();
-        let cancel_flag = self.state.clone();
-        std::thread::spawn(move || {
-            let mut last_emit = std::time::Instant::now();
-            while let Ok((files, dirs, size, path)) = progress_rx.recv() {
-                if cancel_flag.is_cancelled() { break; }
-                if last_emit.elapsed().as_millis() >= 50 {
-                    let _ = app.emit("scan-progress", ScanProgress {
-                        scanned_files: files,
-                        scanned_dirs: dirs,
-                        current_path: path,
-                        total_size: size,
-                        is_complete: false,
-                        phase: "walking".to_string(),
-                    });
-                    last_emit = std::time::Instant::now();
+        let app_handle = app_handle.cloned();
+
+        // Spawn progress reporter thread (only when emitting events)
+        if let Some(app) = app_handle.clone() {
+            let cancel_flag = self.state.clone();
+            std::thread::spawn(move || {
+                let mut last_emit = std::time::Instant::now();
+                while let Ok((files, dirs, size, path)) = progress_rx.recv() {
+                    if cancel_flag.is_cancelled() { break; }
+                    if last_emit.elapsed().as_millis() >= 50 {
+                        let _ = app.emit("scan-progress", ScanProgress {
+                            scanned_files: files,
+                            scanned_dirs: dirs,
+                            current_path: path,
+                            total_size: size,
+                            is_complete: false,
+                            phase: "walking".to_string(),
+                        });
+                        last_emit = std::time::Instant::now();
+                    }
                 }
-            }
-        });
+            });
+        }
 
         // Phase 1: Parallel directory walk with work-stealing
         let walk_start = Instant::now();
@@ -209,10 +214,16 @@ impl Scanner {
             let cancel = cancel_clone.clone();
             let tx = progress_tx_clone.clone();
             let seen = seen_inodes_clone.clone();
+            let limit_hit = hard_limit_hit.clone();
             let mut counter: u64 = 0;
 
             Box::new(move |entry| {
                 if cancel.is_cancelled() {
+                    return WalkState::Quit;
+                }
+
+                if limit_hit.load(Ordering::Relaxed) || nodes.len() >= MAX_SCANNED_NODES {
+                    limit_hit.store(true, Ordering::Relaxed);
                     return WalkState::Quit;
                 }
 
@@ -319,18 +330,23 @@ impl Scanner {
         println!("          Speed: {:.0} files/sec",
             files_count as f64 / walk_time.as_secs_f64());
         println!("          Size: {:.2} GB (deduplicated)", size_total as f64 / 1_073_741_824.0);
+        if hard_limit_hit.load(Ordering::Relaxed) {
+            println!("          NOTE: Node cap ({}) reached; scan truncated to protect memory", MAX_SCANNED_NODES);
+        }
 
         if self.state.is_cancelled() { return None; }
 
         // Phase 2: Build parent-child relationships (parallel with DashMap)
-        let _ = app_handle.emit("scan-progress", ScanProgress {
-            scanned_files: files_count,
-            scanned_dirs: dirs_count,
-            current_path: "Building relationships...".to_string(),
-            total_size: size_total,
-            is_complete: false,
-            phase: "relations".to_string(),
-        });
+        if let Some(app) = app_handle.as_ref() {
+            let _ = app.emit("scan-progress", ScanProgress {
+                scanned_files: files_count,
+                scanned_dirs: dirs_count,
+                current_path: "Building relationships...".to_string(),
+                total_size: size_total,
+                is_complete: false,
+                phase: "relations".to_string(),
+            });
+        }
         let relation_start = Instant::now();
         println!("[Phase 2] Building parent-child relationships...");
         {
@@ -350,14 +366,16 @@ impl Scanner {
         println!("[Phase 2] Relationships built in {:?}", relation_time);
 
         // Phase 3: Calculate sizes bottom-up
-        let _ = app_handle.emit("scan-progress", ScanProgress {
-            scanned_files: files_count,
-            scanned_dirs: dirs_count,
-            current_path: "Calculating sizes...".to_string(),
-            total_size: size_total,
-            is_complete: false,
-            phase: "sizes".to_string(),
-        });
+        if let Some(app) = app_handle.as_ref() {
+            let _ = app.emit("scan-progress", ScanProgress {
+                scanned_files: files_count,
+                scanned_dirs: dirs_count,
+                current_path: "Calculating sizes...".to_string(),
+                total_size: size_total,
+                is_complete: false,
+                phase: "sizes".to_string(),
+            });
+        }
         let size_start = Instant::now();
         println!("[Phase 3] Calculating directory sizes (bottom-up)...");
         self.calc_sizes_bottomup_dashmap(&nodes, root_path);
@@ -365,14 +383,16 @@ impl Scanner {
         println!("[Phase 3] Size calculation completed in {:?}", size_time);
 
         // Phase 4: Build final tree
-        let _ = app_handle.emit("scan-progress", ScanProgress {
-            scanned_files: files_count,
-            scanned_dirs: dirs_count,
-            current_path: "Building tree...".to_string(),
-            total_size: size_total,
-            is_complete: false,
-            phase: "tree".to_string(),
-        });
+        if let Some(app) = app_handle.as_ref() {
+            let _ = app.emit("scan-progress", ScanProgress {
+                scanned_files: files_count,
+                scanned_dirs: dirs_count,
+                current_path: "Building tree...".to_string(),
+                total_size: size_total,
+                is_complete: false,
+                phase: "tree".to_string(),
+            });
+        }
         let tree_start = Instant::now();
         println!("[Phase 4] Building output tree (depth={}, max_children={}, max_nodes={})...", MAX_DEPTH, MAX_CHILDREN, MAX_TOTAL_NODES);
         let tree_node_count = AtomicU64::new(0);
@@ -423,16 +443,18 @@ impl Scanner {
             nodes_in_map: nodes_count,
             memory_used_mb: memory_mb,
         };
-        let _ = app_handle.emit("scan-metrics", metrics);
+        if let Some(app) = app_handle.as_ref() {
+            let _ = app.emit("scan-metrics", metrics);
 
-        let _ = app_handle.emit("scan-progress", ScanProgress {
-            scanned_files: files_count,
-            scanned_dirs: dirs_count,
-            current_path: String::new(),
-            total_size: size_total,
-            is_complete: true,
-            phase: "complete".to_string(),
-        });
+            let _ = app.emit("scan-progress", ScanProgress {
+                scanned_files: files_count,
+                scanned_dirs: dirs_count,
+                current_path: String::new(),
+                total_size: size_total,
+                is_complete: true,
+                phase: "complete".to_string(),
+            });
+        }
 
         tree
     }
@@ -470,6 +492,27 @@ impl Scanner {
                 }
             }
         }
+    }
+
+    fn count_subtree(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path) -> (u64, u64) {
+        let mut files = 0u64;
+        let mut dirs = 0u64;
+        let mut stack = vec![path.to_path_buf()];
+
+        while let Some(p) = stack.pop() {
+            if let Some(node) = nodes.get(&p) {
+                if node.is_dir {
+                    dirs += 1;
+                    for child in &node.children_paths {
+                        stack.push(child.clone());
+                    }
+                } else {
+                    files += 1;
+                }
+            }
+        }
+
+        (files, dirs)
     }
 
     fn build_tree_dashmap(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path, depth: usize, node_count: &AtomicU64) -> Option<FileNode> {
@@ -525,20 +568,16 @@ impl Scanner {
                 } else if let Some(cn) = nodes.get(child_path) {
                     // Node was skipped due to limit, count as "other"
                     other_size += cn.size;
-                    if cn.is_dir {
-                        other_dir_count += 1;
-                    } else {
-                        other_file_count += 1;
-                    }
+                    let (files, dirs) = self.count_subtree(nodes, child_path);
+                    other_file_count += files;
+                    other_dir_count += dirs;
                 }
             } else {
                 if let Some(cn) = nodes.get(child_path) {
                     other_size += cn.size;
-                    if cn.is_dir {
-                        other_dir_count += 1;
-                    } else {
-                        other_file_count += 1;
-                    }
+                    let (files, dirs) = self.count_subtree(nodes, child_path);
+                    other_file_count += files;
+                    other_dir_count += dirs;
                 }
             }
         }
@@ -559,10 +598,26 @@ impl Scanner {
         }
 
         let file_count: u64 = children.iter()
-            .map(|c| if c.is_dir { c.file_count } else { 1 })
+            .map(|c| {
+                if c.is_dir && c.children.is_empty() && c.name.starts_with("<") {
+                    c.file_count
+                } else if c.is_dir {
+                    c.file_count
+                } else {
+                    1
+                }
+            })
             .sum();
         let dir_count: u64 = children.iter()
-            .map(|c| if c.is_dir { 1 + c.dir_count } else { 0 })
+            .map(|c| {
+                if c.is_dir && c.children.is_empty() && c.name.starts_with("<") {
+                    c.dir_count
+                } else if c.is_dir {
+                    1 + c.dir_count
+                } else {
+                    0
+                }
+            })
             .sum();
 
         let node = nodes.get(&path.to_path_buf())?;
