@@ -10,12 +10,13 @@ import { FileNode, TreemapRect, SortOption } from "./types";
  * 4. Only recurse to show nested structure, keeping parent visible
  */
 
-const MIN_AREA_THRESHOLD = 64; // Minimum visible area in pixels
+const MIN_AREA_THRESHOLD = 16; // Minimum visible area in pixels
 const MAX_DEPTH = 3; // Maximum recursion depth
 const HEADER_HEIGHT = 22; // Height for folder name header
 const BASE_PADDING = 3; // Base padding for nesting
 const MIN_AGGREGATED_COUNT = 2; // Minimum items to show aggregated block
 const AGGREGATED_PREVIEW_COUNT = 5; // Max items to store for preview
+const ALWAYS_SHOW_COUNT = 30; // Always render at least this many largest children per level
 
 interface Rect {
   x: number;
@@ -102,8 +103,10 @@ export function layoutTreemap(
     const child = children[i];
     const rect = rects[i];
 
-    // Collect small items instead of skipping
-    if (rect.width * rect.height < MIN_AREA_THRESHOLD) {
+    const area = rect.width * rect.height;
+    const isProtected = i < ALWAYS_SHOW_COUNT;
+    // Collect small items instead of skipping (unless protected)
+    if (!isProtected && area < MIN_AREA_THRESHOLD) {
       skippedNodes.push(child);
       skippedSize += child.size;
       // Track the last valid rect position for aggregated block placement

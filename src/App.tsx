@@ -11,6 +11,9 @@ import {
   CachedScan,
   ScanHistoryEntry,
   DeletedItem,
+  DeleteLogEntry,
+  WatcherStatus,
+  IncrementalStatus,
   FILE_TYPE_COLORS,
   FILE_TYPE_NAMES,
   getFileGradient,
@@ -133,6 +136,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
   onHover,
   onLeave,
   onNavigate,
+  onNavigateToPath,
   onContextMenu,
   onSelect,
   sizeUnit,
@@ -146,6 +150,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
   onHover: (node: FileNode, e: React.MouseEvent) => void;
   onLeave: () => void;
   onNavigate: (node: FileNode) => void;
+  onNavigateToPath: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
   onSelect: () => void;
   sizeUnit: "si" | "binary";
@@ -166,6 +171,16 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
     isCurrentSearchMatch ? "current-search-match" : "",
   ].filter(Boolean).join(" ");
 
+  // Handle double click - for "more items" navigate to parent folder
+  const handleDoubleClick = () => {
+    if (isMoreItems) {
+      // The path of "more items" node is the parent folder path
+      onNavigateToPath(rect.node.path);
+    } else {
+      onNavigate(rect.node);
+    }
+  };
+
   return (
     <div
       className={classNames}
@@ -182,7 +197,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
       onMouseMove={(e) => onHover(rect.node, e)}
       onMouseLeave={onLeave}
       onClick={onSelect}
-      onDoubleClick={isMoreItems ? undefined : () => onNavigate(rect.node)}
+      onDoubleClick={handleDoubleClick}
       onContextMenu={(e) => onContextMenu(e, rect.node)}
     >
       {rect.width > 50 && rect.height > 35 && (
@@ -257,6 +272,13 @@ function App() {
   const [showUndoNotification, setShowUndoNotification] = useState(false);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragCounter = useRef(0);
+  const [lastFullScanAt, setLastFullScanAt] = useState<number | null>(null);
+  const [lastIncrementalAt, setLastIncrementalAt] = useState<number | null>(null);
+  const [deleteLog, setDeleteLog] = useState<DeleteLogEntry[]>([]);
+  const [watcherActive, setWatcherActive] = useState(false);
+  const [watcherError, setWatcherError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncIsFullRescan, setSyncIsFullRescan] = useState(false);
 
   // Get settings from context
   const { settings: appSettings, updateSettings } = useSettings();
@@ -276,12 +298,12 @@ function App() {
     }
   }, []); // Only run once on mount
 
-  // Anime background images
+  // Local, CSP-safe background gradients
   const backgrounds = [
-    "https://w.wallhaven.cc/full/ex/wallhaven-ex9gwo.png",
-    "https://w.wallhaven.cc/full/p9/wallhaven-p9gr22.jpg",
-    "https://w.wallhaven.cc/full/zy/wallhaven-zymgky.jpg",
-    "https://w.wallhaven.cc/full/we/wallhaven-wevx1l.png",
+    "linear-gradient(135deg, #0f172a 0%, #1f2937 50%, #0b132b 100%)",
+    "radial-gradient(circle at 20% 20%, #fef3c7 0%, #fde68a 25%, #fef3c7 55%, #fcd34d 100%)",
+    "linear-gradient(120deg, #0ea5e9 0%, #2563eb 50%, #7c3aed 100%)",
+    "linear-gradient(145deg, #111827 0%, #1f2937 45%, #4b5563 100%)",
   ];
   const errorIdRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -291,6 +313,17 @@ function App() {
   useEffect(() => {
     invoke<ScanHistoryEntry[]>("get_scan_history").then(setScanHistory).catch(console.error);
   }, []);
+
+  // Load delete log for the current scan path
+  useEffect(() => {
+    if (!currentScanPath) {
+      setDeleteLog([]);
+      return;
+    }
+    invoke<DeleteLogEntry[]>("get_delete_log", { scan_path: currentScanPath, limit: 8 })
+      .then(setDeleteLog)
+      .catch(console.error);
+  }, [currentScanPath]);
 
   const addNotification = useCallback((message: string, type: 'error' | 'warning' | 'info') => {
     const id = ++errorIdRef.current;
@@ -316,6 +349,9 @@ function App() {
       if (event.payload.is_complete) {
         setIsScanning(false);
         setIsFromCache(false);
+        const now = Math.floor(Date.now() / 1000);
+        setLastFullScanAt(now);
+        setLastIncrementalAt(now);
       }
     });
 
@@ -325,11 +361,33 @@ function App() {
       setIsFromCache(true);
       setCacheTime(event.payload.scanned_at);
       setIsScanning(false);
+      setLastFullScanAt(event.payload.scanned_at);
+      setLastIncrementalAt(event.payload.last_incremental_at ?? event.payload.scanned_at);
+    });
+
+    const unlistenWatcher = listen<WatcherStatus>("watcher-status", (event) => {
+      setWatcherActive(event.payload.active);
+      setWatcherError(event.payload.error ?? null);
+    });
+
+    const unlistenIncrementalStatus = listen<IncrementalStatus>("incremental-status", (event) => {
+      if (event.payload.phase === "start") {
+        setIsSyncing(true);
+        setSyncIsFullRescan(event.payload.full_rescan);
+      } else {
+        setIsSyncing(false);
+        setSyncIsFullRescan(false);
+        if (event.payload.updated) {
+          setLastIncrementalAt(event.payload.at);
+        }
+      }
     });
 
     return () => {
       unlistenProgress.then((fn) => fn());
       unlistenCache.then((fn) => fn());
+      unlistenWatcher.then((fn) => fn());
+      unlistenIncrementalStatus.then((fn) => fn());
     };
   }, []);
 
@@ -622,6 +680,65 @@ function App() {
     return null;
   }, []);
 
+  // Build navigation path from root to target
+  const buildNavigationPath = useCallback((root: FileNode | null, targetPath: string): FileNode[] => {
+    if (!root) return [];
+    if (root.path === targetPath) return [];
+    for (const child of root.children) {
+      if (targetPath === child.path || targetPath.startsWith(child.path + "/")) {
+        if (child.path === targetPath) {
+          return [child];
+        }
+        return [child, ...buildNavigationPath(child, targetPath)];
+      }
+    }
+    return [];
+  }, []);
+
+  // Remove a node from the tree and recompute aggregates without a rescan
+  const removeNodeFromTree = useCallback(
+    (node: FileNode, targetPath: string): { updated: FileNode; removed: boolean } => {
+      if (!node.is_dir) {
+        return { updated: node, removed: false };
+      }
+
+      let removed = false;
+      const newChildren: FileNode[] = [];
+
+      for (const child of node.children) {
+        if (child.path === targetPath) {
+          removed = true;
+          continue;
+        }
+        const { updated: updatedChild, removed: childRemoved } = removeNodeFromTree(child, targetPath);
+        if (childRemoved) {
+          removed = true;
+        }
+        newChildren.push(updatedChild);
+      }
+
+      if (!removed) {
+        return { updated: node, removed: false };
+      }
+
+      const size = newChildren.reduce((sum, c) => sum + c.size, 0);
+      const fileCount = newChildren.reduce(
+        (sum, c) => sum + (c.is_dir ? c.file_count : 1),
+        0
+      );
+      const dirCount = newChildren.reduce(
+        (sum, c) => sum + (c.is_dir ? 1 + c.dir_count : 0),
+        0
+      );
+
+      return {
+        updated: { ...node, children: newChildren, size, file_count: fileCount, dir_count: dirCount },
+        removed: true,
+      };
+    },
+    []
+  );
+
   const navigateTo = useCallback(
     (node: FileNode) => {
       // Only navigate into directories that have children
@@ -632,6 +749,42 @@ function App() {
     },
     []
   );
+
+  // Navigate to a path (used for "more items" to navigate to parent folder)
+  const navigateToPath = useCallback(
+    (path: string) => {
+      const node = findNodeByPath(rootNode, path);
+      if (node && node.is_dir && node.children.length > 0) {
+        const newPath = buildNavigationPath(rootNode, path);
+        setNavigationPath(newPath);
+        setCurrentNode(node);
+      }
+    },
+    [rootNode, findNodeByPath, buildNavigationPath]
+  );
+
+  const handleIncrementalUpdate = useCallback(
+    (nextRoot: FileNode) => {
+      setRootNode(nextRoot);
+      const desiredPath = currentNode?.path || nextRoot.path;
+      const nextCurrent = findNodeByPath(nextRoot, desiredPath) || nextRoot;
+      setCurrentNode(nextCurrent);
+      setNavigationPath(buildNavigationPath(nextRoot, nextCurrent.path));
+      setIsFromCache(false);
+      setIsScanning(false);
+    },
+    [currentNode, findNodeByPath, buildNavigationPath]
+  );
+
+  useEffect(() => {
+    const unlistenIncremental = listen<FileNode>("scan-incremental", (event) => {
+      handleIncrementalUpdate(event.payload);
+    });
+
+    return () => {
+      unlistenIncremental.then((fn) => fn());
+    };
+  }, [handleIncrementalUpdate]);
 
   const navigateToIndex = useCallback(
     (index: number) => {
@@ -702,65 +855,55 @@ function App() {
   };
   void _handlePreviewFile; // Suppress unused warning
 
+  const handleIncrementalRefresh = async () => {
+    try {
+      setIsSyncing(true);
+      await invoke("refresh_incremental");
+    } catch (e) {
+      showError(`Incremental refresh failed: ${e}`);
+      setIsSyncing(false);
+    }
+  };
+
   const handleMoveToTrash = async (path: string) => {
     try {
-      // move_to_trash now returns the deleted item info
-      const deletedItem = await invoke<DeletedItem>("move_to_trash", { path });
+      // Use move_to_trash_logged for logging
+      await invoke("move_to_trash_logged", {
+        path,
+        scan_path: rootNode?.path || undefined,
+        size_bytes: contextMenu?.node.size || undefined,
+      });
       setContextMenu(null);
 
-      // Show undo notification
-      setLastDeleted(deletedItem);
-      setShowUndoNotification(true);
-
-      // Clear previous timeout and set new one
-      if (undoTimeoutRef.current) {
-        clearTimeout(undoTimeoutRef.current);
-      }
-      undoTimeoutRef.current = setTimeout(() => {
-        setShowUndoNotification(false);
-      }, 8000); // 8 seconds to undo
-
-      // Update tree locally instead of rescanning
       if (rootNode) {
-        const removeNodeFromTree = (node: FileNode, targetPath: string): FileNode | null => {
-          // If this node is the target, return null to remove it
-          if (node.path === targetPath) {
-            return null;
-          }
-          // If this node has children, filter them
-          if (node.children && node.children.length > 0) {
-            const newChildren = node.children
-              .map(child => removeNodeFromTree(child, targetPath))
-              .filter((child): child is FileNode => child !== null);
+        // Trigger incremental refresh
+        invoke("refresh_incremental").catch((e) =>
+          showError(`Failed to sync changes: ${e}`)
+        );
 
-            // Recalculate size
-            const removedSize = deletedItem.size;
-            return {
-              ...node,
-              children: newChildren,
-              size: node.size - removedSize,
-              file_count: node.file_count - (deletedItem.is_dir ? 0 : 1),
-              dir_count: node.dir_count - (deletedItem.is_dir ? 1 : 0),
-            };
-          }
-          return node;
-        };
-
-        const updatedRoot = removeNodeFromTree(rootNode, path);
-        if (updatedRoot) {
-          setRootNode(updatedRoot);
-          // Update currentNode if needed
-          if (currentNode) {
-            const updatedCurrent = removeNodeFromTree(currentNode, path);
-            if (updatedCurrent) {
-              setCurrentNode(updatedCurrent);
-            }
-          }
+        const { updated, removed } = removeNodeFromTree(rootNode, path);
+        if (removed) {
+          setRootNode(updated);
+          // Keep the user where they are if possible; otherwise fall back to root
+          const desiredPath = currentNode?.path || updated.path;
+          const nextCurrent = findNodeByPath(updated, desiredPath) || updated;
+          setCurrentNode(nextCurrent);
+          setNavigationPath(buildNavigationPath(updated, nextCurrent.path));
+          setLastIncrementalAt(Math.floor(Date.now() / 1000));
         }
+
         // Clear selection if deleted item was selected
         if (selectedIndex >= 0) {
           setSelectedIndex(-1);
         }
+
+        // Refresh delete log
+        invoke<DeleteLogEntry[]>("get_delete_log", {
+          scan_path: rootNode.path,
+          limit: 8,
+        })
+          .then(setDeleteLog)
+          .catch(console.error);
       }
     } catch (e) {
       showError(`Failed to move to trash: ${e}`);
@@ -898,6 +1041,13 @@ function App() {
     setSelectedIndex(searchMatchIndices[prevIndex]);
   }, [searchMatchIndices, currentSearchMatchIndex]);
 
+  // Keep selection in range when filters/search change
+  useEffect(() => {
+    if (selectedIndex >= filteredRects.length) {
+      setSelectedIndex(filteredRects.length > 0 ? filteredRects.length - 1 : -1);
+    }
+  }, [filteredRects, selectedIndex]);
+
   // Jump to largest item
   const jumpToLargest = useCallback(() => {
     if (filteredRects.length > 0) {
@@ -1021,6 +1171,12 @@ function App() {
         if (selectedIndex < 0) {
           // No selection, select the largest (first) item
           setSelectedIndex(0);
+          return;
+        }
+
+        // If the filtered list shrank, clamp the selection before using it
+        if (selectedIndex >= filteredRects.length) {
+          setSelectedIndex(filteredRects.length > 0 ? filteredRects.length - 1 : -1);
           return;
         }
 
@@ -1428,11 +1584,60 @@ function App() {
         <ThemeSwitcher />
       </div>
 
+      {rootNode && (
+        <div className="trust-bar" role="status" aria-live="polite">
+          <div className="trust-item">
+            <span className="trust-label">Full Scan</span>
+            <span className="trust-value">
+              {lastFullScanAt ? formatCacheTime(lastFullScanAt) : "—"}
+            </span>
+          </div>
+          <div className="trust-item">
+            <span className="trust-label">Incremental</span>
+            <span className="trust-value">
+              {lastIncrementalAt ? formatCacheTime(lastIncrementalAt) : "—"}
+            </span>
+          </div>
+          <div className="trust-item">
+            <span className="trust-label">Watcher</span>
+            <span className={`trust-value${watcherActive ? " trust-live" : " trust-off"}`}>
+              {watcherActive ? "Live" : "Off"}
+            </span>
+          </div>
+          <button
+            className="trust-refresh-btn"
+            onClick={handleIncrementalRefresh}
+            title="Refresh incremental changes"
+            disabled={isSyncing}
+          >
+            {isSyncing ? "Syncing..." : "Sync"}
+          </button>
+          {syncIsFullRescan && (
+            <div className="trust-item">
+              <span className="trust-label">Mode</span>
+              <span className="trust-value">Full Rescan</span>
+            </div>
+          )}
+          {deleteLog.length > 0 && (
+            <div className="trust-item">
+              <span className="trust-label">Recent Deletes</span>
+              <span className="trust-value">{deleteLog.length}</span>
+            </div>
+          )}
+          {watcherError && (
+            <div className="trust-item">
+              <span className="trust-label">Watcher Error</span>
+              <span className="trust-value">{watcherError}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Anime Background */}
       {showBackground && (
         <div
           className="anime-background"
-          style={{ backgroundImage: `url(${backgrounds[bgIndex]})` }}
+          style={{ backgroundImage: backgrounds[bgIndex] }}
         />
       )}
 
@@ -1562,6 +1767,24 @@ function App() {
           scanPath={rootNode.path}
           onClose={() => setShowScanCompare(false)}
         />
+      )}
+
+      {/* Delete Log */}
+      {rootNode && deleteLog.length > 0 && !isScanning && (
+        <div className="delete-log">
+          <div className="delete-log-header">Recent Deletes</div>
+          <div className="delete-log-list">
+            {deleteLog.slice(0, 6).map((entry) => (
+              <div key={entry.id} className="delete-log-item">
+                <span className="delete-log-path">
+                  {entry.target_path.split("/").pop() || entry.target_path}
+                </span>
+                <span className="delete-log-size">{formatSize(entry.size_bytes)}</span>
+                <span className="delete-log-time">{formatDate(entry.deleted_at)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Main Content */}
@@ -1708,6 +1931,7 @@ function App() {
                     onHover={handleCellHover}
                     onLeave={handleCellLeave}
                     onNavigate={navigateTo}
+                    onNavigateToPath={navigateToPath}
                     onContextMenu={handleContextMenu}
                     onSelect={() => setSelectedIndex(originalIndex)}
                     sizeUnit={appSettings.size_unit}
