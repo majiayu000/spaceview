@@ -171,6 +171,8 @@ struct TempNode {
     extension: Option<Box<str>>,
     modified_at: Option<u64>,
     children_paths: Option<Vec<PathBuf>>,  // None for files saves 24 bytes per file
+    file_count: u64,
+    dir_count: u64,
 }
 
 pub struct Scanner {
@@ -182,7 +184,7 @@ impl Scanner {
         Self { state }
     }
 
-    pub fn scan(&self, root_path: &Path, app_handle: &AppHandle, settings: &Settings) -> Option<FileNode> {
+    pub fn scan(&self, root_path: &Path, app_handle: Option<AppHandle>, settings: &Settings) -> Option<FileNode> {
         self.state.reset();
 
         let total_start = Instant::now();
@@ -211,7 +213,7 @@ impl Scanner {
         // Progress channel for UI updates
         let (progress_tx, progress_rx) = bounded::<(u64, u64, u64, String)>(100);
 
-        let app_handle = app_handle.cloned();
+        let app_handle = app_handle;
 
         // Spawn progress reporter thread (only when emitting events)
         if let Some(app) = app_handle.clone() {
@@ -381,25 +383,33 @@ impl Scanner {
                 // For duplicate hard links, store 0 size to avoid double-counting in tree
                 let stored_size = if is_duplicate { 0 } else { file_size };
 
+                counter += 1;
+                let path_for_progress = if counter.is_multiple_of(1000) {
+                    Some(path.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+
                 // DashMap insert is lock-free!
                 // Memory optimization: files don't need children_paths Vec
-                nodes.insert(path.clone(), TempNode {
+                nodes.insert(path, TempNode {
                     name: name.into_boxed_str(),
                     size: stored_size,
                     is_dir,
                     extension: extension.map(|s| s.into_boxed_str()),
                     modified_at,
                     children_paths: if is_dir { Some(Vec::new()) } else { None },
+                    file_count: if is_dir { 0 } else { 1 },
+                    dir_count: if is_dir { 1 } else { 0 },
                 });
 
                 // Send progress every 1000 items
-                counter += 1;
-                if counter.is_multiple_of(1000) {
+                if let Some(path_str) = path_for_progress {
                     let _ = tx.try_send((
                         files.load(Ordering::Relaxed),
                         dirs.load(Ordering::Relaxed),
                         size.load(Ordering::Relaxed),
-                        path.to_string_lossy().to_string(),
+                        path_str,
                     ));
                 }
 
@@ -454,59 +464,31 @@ impl Scanner {
         let relation_start = Instant::now();
         println!("[Phase 2] Building parent-child relationships...");
 
-        // Memory optimization: Process in batches to avoid peak memory spike
-        // Instead of collecting all pairs at once, process in chunks
-        const BATCH_SIZE: usize = 50_000;
-
         {
             let mut processed_paths: usize = 0;
-            let mut batch_idx: usize = 0;
-            let mut batch_pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(BATCH_SIZE);
 
             for entry in nodes.iter() {
                 let path = entry.key().clone();
                 drop(entry);
 
                 if let Some(parent) = path.parent() {
-                    let parent_path = parent.to_path_buf();
-                    if nodes.contains_key(&parent_path) {
-                        batch_pairs.push((path, parent_path));
-                        if batch_pairs.len() >= BATCH_SIZE {
-                            for (child_path, parent_path) in batch_pairs.drain(..) {
-                                if let Some(mut parent_node) = nodes.get_mut(&parent_path) {
-                                    if let Some(ref mut children) = parent_node.children_paths {
-                                        children.push(child_path);
-                                    }
-                                }
-                            }
-                            batch_idx += 1;
-
-                            if self.state.is_cancelled() {
-                                println!("[Phase 2] Cancelled at batch {}", batch_idx);
-                                return None;
-                            }
+                    if let Some(mut parent_node) = nodes.get_mut(parent) {
+                        if let Some(ref mut children) = parent_node.children_paths {
+                            children.push(path);
                         }
                     }
                 }
 
                 processed_paths += 1;
-            }
-
-            if !batch_pairs.is_empty() {
-                for (child_path, parent_path) in batch_pairs.drain(..) {
-                    if let Some(mut parent_node) = nodes.get_mut(&parent_path) {
-                        if let Some(ref mut children) = parent_node.children_paths {
-                            children.push(child_path);
-                        }
-                    }
+                if self.state.is_cancelled() {
+                    println!("[Phase 2] Cancelled");
+                    return None;
                 }
-                batch_idx += 1;
             }
 
             println!(
-                "[Phase 2] Processed {} paths in {} batches",
-                processed_paths,
-                batch_idx
+                "[Phase 2] Processed {} paths",
+                processed_paths
             );
         }
 
@@ -649,14 +631,21 @@ impl Scanner {
                 if let Some(node) = nodes.get(&path) {
                     if node.is_dir {
                         if let Some(ref children) = node.children_paths {
-                            let children_size: u64 = children
-                                .iter()
-                                .filter_map(|cp| nodes.get(cp))
-                                .map(|cn| cn.size)
-                                .sum();
+                            let mut children_size: u64 = 0;
+                            let mut total_files: u64 = 0;
+                            let mut total_dirs: u64 = 1;
+                            for child in children {
+                                if let Some(child_node) = nodes.get(child) {
+                                    children_size += child_node.size;
+                                    total_files += child_node.file_count;
+                                    total_dirs += child_node.dir_count;
+                                }
+                            }
                             drop(node); // Release read lock before write
                             if let Some(mut node_mut) = nodes.get_mut(&path) {
                                 node_mut.size = children_size;
+                                node_mut.file_count = total_files;
+                                node_mut.dir_count = total_dirs;
                             }
                         }
                     }
@@ -674,27 +663,6 @@ impl Scanner {
         }
     }
 
-    fn count_subtree(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path) -> (u64, u64) {
-        let mut files = 0u64;
-        let mut dirs = 0u64;
-        let mut stack = vec![path.to_path_buf()];
-
-        while let Some(p) = stack.pop() {
-            if let Some(node) = nodes.get(&p) {
-                if node.is_dir {
-                    dirs += 1;
-                    for child in &node.children_paths {
-                        stack.push(child.clone());
-                    }
-                } else {
-                    files += 1;
-                }
-            }
-        }
-
-        (files, dirs)
-    }
-
     fn build_tree_dashmap(&self, nodes: &Arc<DashMap<PathBuf, TempNode>>, path: &Path, depth: usize, node_count: &AtomicU64) -> Option<FileNode> {
         // Check total node limit to keep JSON size manageable for IPC
         if node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64 {
@@ -702,6 +670,9 @@ impl Scanner {
         }
         let node = nodes.get(path)?;
         let path_str = path.to_string_lossy().to_string();
+        let node_name = node.name.to_string();
+        let node_size = node.size;
+        let node_modified_at = node.modified_at;
 
         // Increment node count
         node_count.fetch_add(1, Ordering::Relaxed);
@@ -709,37 +680,45 @@ impl Scanner {
         if !node.is_dir {
             return Some(FileNode {
                 id: path_str.clone(),
-                name: node.name.to_string(),
+                name: node_name,
                 path: path_str,
-                size: node.size,
+                size: node_size,
                 is_dir: false,
                 children: vec![],
                 extension: node.extension.as_ref().map(|s| s.to_string()),
                 file_count: 0,
                 dir_count: 0,
-                modified_at: node.modified_at,
+                modified_at: node_modified_at,
             });
         }
 
         // Sort children by size (descending) while caching size/is_dir metadata.
-        let children_paths = node.children_paths.clone().unwrap_or_default();
-        drop(node); // Release lock for recursive calls
-
-        let mut children_with_meta: Vec<(PathBuf, u64, bool)> = Vec::with_capacity(children_paths.len());
-        for child_path in children_paths {
-            if let Some(child_node) = nodes.get(&child_path) {
-                children_with_meta.push((child_path, child_node.size, child_node.is_dir));
+        let mut children_with_meta: Vec<(PathBuf, u64, u64, u64)> = match node.children_paths.as_ref() {
+            Some(children_paths) => Vec::with_capacity(children_paths.len()),
+            None => Vec::new(),
+        };
+        if let Some(children_paths) = node.children_paths.as_ref() {
+            for child_path in children_paths {
+                if let Some(child_node) = nodes.get(child_path) {
+                    children_with_meta.push((
+                        child_path.clone(),
+                        child_node.size,
+                        child_node.file_count,
+                        child_node.dir_count,
+                    ));
+                }
             }
         }
+        drop(node); // Release lock for recursive calls
 
-        children_with_meta.sort_by(|a, b| b.1.cmp(&a.1));
+        children_with_meta.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
         let mut children = Vec::new();
         let mut other_size: u64 = 0;
         let mut other_file_count: u64 = 0;
         let mut other_dir_count: u64 = 0;
 
-        for (i, (child_path, child_size, child_is_dir)) in children_with_meta.iter().enumerate() {
+        for (i, (child_path, child_size, child_file_count, child_dir_count)) in children_with_meta.iter().enumerate() {
             // Check all limits: children count, depth, and total nodes
             let at_limit = node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64;
             if i < MAX_CHILDREN && depth < MAX_DEPTH && !at_limit {
@@ -748,15 +727,13 @@ impl Scanner {
                 } else {
                     // Node was skipped due to limit, count as "other"
                     other_size += *child_size;
-                    let (files, dirs) = self.count_subtree(nodes, child_path);
-                    other_file_count += files;
-                    other_dir_count += dirs;
+                    other_file_count += *child_file_count;
+                    other_dir_count += *child_dir_count;
                 }
             } else {
                 other_size += *child_size;
-                let (files, dirs) = self.count_subtree(nodes, child_path);
-                other_file_count += files;
-                other_dir_count += dirs;
+                other_file_count += *child_file_count;
+                other_dir_count += *child_dir_count;
             }
         }
 
@@ -798,18 +775,17 @@ impl Scanner {
             })
             .sum();
 
-        let node = nodes.get(&path.to_path_buf())?;
         Some(FileNode {
             id: path_str.clone(),
-            name: node.name.to_string(),
+            name: node_name,
             path: path_str,
-            size: node.size,
+            size: node_size,
             is_dir: true,
             children,
             extension: None,
             file_count,
             dir_count,
-            modified_at: node.modified_at,
+            modified_at: node_modified_at,
         })
     }
 }

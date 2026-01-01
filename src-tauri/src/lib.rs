@@ -45,7 +45,7 @@ pub struct DeletedItem {
 /// Manages undo history for file deletions
 pub struct UndoManager {
     /// Stack of deleted items (most recent first)
-    history: Mutex<VecDeque<DeletedItem>>,
+    history: ParkingLotMutex<VecDeque<DeletedItem>>,
     /// Maximum number of items to keep in history
     max_history: usize,
 }
@@ -53,7 +53,7 @@ pub struct UndoManager {
 impl UndoManager {
     pub fn new(max_history: usize) -> Self {
         Self {
-            history: Mutex::new(VecDeque::new()),
+            history: ParkingLotMutex::new(VecDeque::new()),
             max_history,
         }
     }
@@ -349,6 +349,7 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
     };
 
     let root_path = PathBuf::from(&scan_path);
+    let scan_settings = settings::load_settings();
 
     let dirty_paths = {
         let mut guard = state.dirty_paths.lock().unwrap();
@@ -400,7 +401,8 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
 
     if updated_root.is_none() || full_rescan {
         let scanner = Scanner::new(state.scanner_state.clone());
-        let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
+        let scan_settings = scan_settings.clone();
+        let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None, &scan_settings))
             .await
             .map_err(|e| e.to_string())?;
         if let Some(root) = result {
@@ -425,7 +427,8 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
 
         if effective_dirs.iter().any(|p| p == &root_path) {
             let scanner = Scanner::new(state.scanner_state.clone());
-            let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
+            let scan_settings = scan_settings.clone();
+            let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None, &scan_settings))
                 .await
                 .map_err(|e| e.to_string())?;
             if let Some(root) = result {
@@ -439,9 +442,10 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
                 }
                 let dir_clone = dir.clone();
                 let scanner_state = scanner_state.clone();
+                let scan_settings = scan_settings.clone();
                 if let Ok(Some(subtree)) = tokio::task::spawn_blocking(move || {
                     let scanner = Scanner::new(scanner_state);
-                    scanner.scan(&dir_clone, None)
+                    scanner.scan(&dir_clone, None, &scan_settings)
                 })
                 .await
                 .map_err(|e| e.to_string())
@@ -554,7 +558,7 @@ async fn scan_directory(
 
     // Run scanning in a blocking task to not block the async runtime
     let app_for_scan = app_handle.clone();
-    let result = tokio::task::spawn_blocking(move || scanner.scan(&path_buf, &app_for_scan, &scan_settings))
+    let result = tokio::task::spawn_blocking(move || scanner.scan(&path_buf, Some(app_for_scan), &scan_settings))
         .await
         .map_err(|e| e.to_string());
 

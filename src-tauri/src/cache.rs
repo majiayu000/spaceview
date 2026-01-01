@@ -534,6 +534,7 @@ pub fn save_snapshot(scan_path: &str, root: &FileNode) -> Result<PathBuf, String
         version: CACHE_VERSION,
         scan_path: scan_path.to_string(),
         scanned_at: now,
+        last_incremental_at: Some(now),
         total_files,
         total_dirs,
         total_size: root.size,
