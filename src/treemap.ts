@@ -10,8 +10,8 @@ import { FileNode, TreemapRect } from "./types";
  * 4. Only recurse to show nested structure, keeping parent visible
  */
 
-const MIN_AREA_THRESHOLD = 16; // Minimum visible area in pixels
-const MAX_DEPTH = 3; // Maximum recursion depth
+const MIN_AREA_THRESHOLD = 4; // Minimum visible area in pixels
+const MAX_DEPTH = 8; // Maximum recursion depth
 const HEADER_HEIGHT = 22; // Height for folder name header
 const BASE_PADDING = 3; // Base padding for nesting
 const ALWAYS_SHOW_COUNT = 30; // Always render at least this many largest children per level

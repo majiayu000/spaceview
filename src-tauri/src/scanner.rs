@@ -54,9 +54,8 @@ fn get_memory_usage() -> u64 {
     0
 }
 
-const MAX_CHILDREN: usize = 200;  // Children per directory before grouping
-const MAX_DEPTH: usize = 15;      // Maximum tree depth
-const MAX_TOTAL_NODES: usize = 100_000;  // Absolute limit on total nodes in tree
+const MAX_DEPTH: usize = 64;      // Maximum tree depth (SpaceSniffer-style)
+const MAX_TOTAL_NODES: usize = 250_000;  // Absolute limit on total nodes in tree
 const MAX_SCANNED_NODES: usize = 1_000_000; // Hard cap to avoid exhausting RAM during walk
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,7 +393,7 @@ impl Scanner {
             });
         }
         let tree_start = Instant::now();
-        println!("[Phase 4] Building output tree (depth={}, max_children={}, max_nodes={})...", MAX_DEPTH, MAX_CHILDREN, MAX_TOTAL_NODES);
+        println!("[Phase 4] Building output tree (depth={}, max_nodes={})...", MAX_DEPTH, MAX_TOTAL_NODES);
         let tree_node_count = AtomicU64::new(0);
         let tree = self.build_tree_dashmap(&nodes, root_path, 0, &tree_node_count);
         let final_node_count = tree_node_count.load(Ordering::Relaxed);
@@ -558,11 +557,11 @@ impl Scanner {
         let mut other_file_count: u64 = 0;
         let mut other_dir_count: u64 = 0;
 
-        for (i, child_path) in children_sorted.iter().enumerate() {
+        for child_path in children_sorted.iter() {
             // Check total node limit before recursing
             let at_limit = node_count.load(Ordering::Relaxed) >= MAX_TOTAL_NODES as u64;
 
-            if i < MAX_CHILDREN && depth < MAX_DEPTH && !at_limit {
+            if depth < MAX_DEPTH && !at_limit {
                 if let Some(child) = self.build_tree_dashmap(nodes, child_path, depth + 1, node_count) {
                     children.push(child);
                 } else if let Some(cn) = nodes.get(child_path) {
