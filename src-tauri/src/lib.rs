@@ -242,11 +242,21 @@ fn replace_subtree(mut root: FileNode, target_path: &str, new_subtree: &FileNode
     root
 }
 
+/// Clears `scan_in_progress` on drop so `?` early returns cannot leave the lock stuck.
+struct ScanInProgressGuard(Arc<AtomicBool>);
+
+impl Drop for ScanInProgressGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
     if state.scan_in_progress.swap(true, Ordering::Relaxed) {
         return Ok(());
     }
+    let _scan_guard = ScanInProgressGuard(state.scan_in_progress.clone());
 
     let scan_path = {
         let path_guard = state.current_scan_path.lock().unwrap();
@@ -256,7 +266,6 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
     let scan_path = match scan_path {
         Some(p) => p,
         None => {
-            state.scan_in_progress.store(false, Ordering::Relaxed);
             return Ok(());
         }
     };
@@ -283,7 +292,6 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
                 at: now,
             },
         );
-        state.scan_in_progress.store(false, Ordering::Relaxed);
         return Ok(());
     }
 
@@ -407,7 +415,6 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
         Ok(())
     };
 
-    state.scan_in_progress.store(false, Ordering::Relaxed);
     result
 }
 
