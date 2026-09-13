@@ -729,6 +729,22 @@ function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Suspend treemap/global shortcuts while trash confirmation is open
+      if (trashConfirm) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setTrashConfirm(null);
+        } else if (
+          e.key === 'Enter' ||
+          e.key === 'Backspace' ||
+          ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key) ||
+          ((e.metaKey || e.ctrlKey) && e.key === 'o')
+        ) {
+          e.preventDefault();
+        }
+        return;
+      }
+
       // Cmd+O / Ctrl+O to open folder
       if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
         e.preventDefault();
@@ -818,7 +834,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isScanning, filteredRects, selectedIndex, navigationPath, navigateTo, navigateToIndex]);
+  }, [isScanning, filteredRects, selectedIndex, navigationPath, navigateTo, navigateToIndex, trashConfirm]);
 
   // Stable callbacks for memoized treemap cells
   const handleCellHover = useCallback((node: FileNode, e: React.MouseEvent) => {

@@ -32,7 +32,8 @@ pub struct CachedScan {
     pub root: FileNode,
 }
 
-const CACHE_VERSION: u32 = 1;
+// Bumped when FileNode gained `is_placeholder` (bincode layout change).
+const CACHE_VERSION: u32 = 2;
 
 /// Get the cache directory path
 fn get_cache_dir() -> Option<PathBuf> {
