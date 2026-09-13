@@ -582,10 +582,13 @@ impl Scanner {
         }
 
         if other_file_count + other_dir_count > 0 {
+            // Sentinel path must never resolve to a real directory — reusing the
+            // parent path made "Move to Trash" delete the entire parent folder.
+            let sentinel_path = format!("{}/__other__", path_str);
             children.push(FileNode {
-                id: format!("{}/__other__", path_str),
+                id: sentinel_path.clone(),
                 name: format!("<{} more items>", other_file_count + other_dir_count),
-                path: path_str.clone(),
+                path: sentinel_path,
                 size: other_size,
                 is_dir: true,
                 children: vec![],

@@ -11,6 +11,32 @@ export interface FileNode {
   modified_at?: number;  // Unix timestamp in seconds
 }
 
+/** Sentinel suffix for truncated "<N more items>" placeholder nodes. */
+export const MORE_ITEMS_SENTINEL = "__other__";
+
+/** True for truncated more-items placeholders (never a real filesystem path). */
+export function isMoreItemsPlaceholder(node: Pick<FileNode, "id" | "name" | "path">): boolean {
+  return (
+    node.id.endsWith(`/${MORE_ITEMS_SENTINEL}`) ||
+    node.path.endsWith(`/${MORE_ITEMS_SENTINEL}`) ||
+    (node.name.startsWith("<") && node.name.includes("more items"))
+  );
+}
+
+/**
+ * Parent directory for a more-items placeholder.
+ * Prefer id/path sentinel (`{parent}/__other__`); fall back to legacy nodes
+ * that reused the parent path as `path`.
+ */
+export function moreItemsParentPath(node: Pick<FileNode, "id" | "name" | "path">): string {
+  const strip = (value: string) =>
+    value.endsWith(`/${MORE_ITEMS_SENTINEL}`)
+      ? value.slice(0, -(MORE_ITEMS_SENTINEL.length + 1))
+      : null;
+
+  return strip(node.id) ?? strip(node.path) ?? node.path;
+}
+
 export interface ScanProgress {
   scanned_files: number;
   scanned_dirs: number;

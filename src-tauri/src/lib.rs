@@ -600,9 +600,42 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Reject placeholder / out-of-scope paths before any trash operation.
+fn validate_trash_target(path: &str, scan_path: Option<&str>) -> Result<(), String> {
+    let path_buf = std::path::PathBuf::from(path);
+
+    // Truncated "<N more items>" cells use a non-existent `{parent}/__other__` sentinel.
+    if path_buf
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "__other__")
+        || path.contains("/__other__")
+        || path.ends_with("__other__")
+    {
+        return Err(
+            "Refusing to trash placeholder path (__other__). This is not a real file or folder."
+                .to_string(),
+        );
+    }
+
+    if let Some(root) = scan_path {
+        let root_buf = std::path::PathBuf::from(root);
+        if !path_buf.starts_with(&root_buf) {
+            return Err(format!(
+                "Refusing to trash path outside the active scan root ({}): {}",
+                root, path
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Move file to trash (using safe trash crate, no shell injection risk)
 #[tauri::command]
 fn move_to_trash(path: String) -> Result<(), String> {
+    validate_trash_target(&path, None)?;
+
     let path_buf = std::path::PathBuf::from(&path);
 
     if !path_buf.exists() {
@@ -619,6 +652,8 @@ fn move_to_trash_logged(
     scan_path: Option<String>,
     size_bytes: Option<u64>,
 ) -> Result<(), String> {
+    validate_trash_target(&path, scan_path.as_deref())?;
+
     let path_buf = std::path::PathBuf::from(&path);
     if !path_buf.exists() {
         return Err(format!("Path does not exist: {}", path));

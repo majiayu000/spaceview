@@ -20,6 +20,8 @@ import {
   getFileType,
   formatSize,
   formatDate,
+  isMoreItemsPlaceholder,
+  moreItemsParentPath,
 } from "./types";
 import { layoutTreemap } from "./treemap";
 import { ThemeSwitcher } from "./ThemeSwitcher";
@@ -89,7 +91,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
   onContextMenu: (e: React.MouseEvent, node: FileNode) => void;
   onSelect: () => void;
 }) {
-  const isMoreItems = rect.node.name.startsWith("<") && rect.node.name.includes("more items");
+  const isMoreItems = isMoreItemsPlaceholder(rect.node);
 
   // Extract count from "<N more items>"
   const moreItemsCount = isMoreItems
@@ -99,8 +101,8 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
   // Handle double click - for "more items" navigate to parent folder
   const handleDoubleClick = () => {
     if (isMoreItems) {
-      // The path of "more items" node is the parent folder path
-      onNavigateToPath(rect.node.path);
+      // Sentinel path is `{parent}/__other__`; navigate to the real parent.
+      onNavigateToPath(moreItemsParentPath(rect.node));
     } else {
       onNavigate(rect.node);
     }
@@ -188,6 +190,11 @@ function App() {
   const [watcherError, setWatcherError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncIsFullRescan, setSyncIsFullRescan] = useState(false);
+  const [trashConfirm, setTrashConfirm] = useState<{
+    path: string;
+    name: string;
+    size?: number;
+  } | null>(null);
 
   // Local, CSP-safe background gradients
   const backgrounds = [
@@ -639,14 +646,23 @@ function App() {
     }
   };
 
+  const requestMoveToTrash = (node: FileNode) => {
+    if (isMoreItemsPlaceholder(node)) {
+      setContextMenu(null);
+      return;
+    }
+    setContextMenu(null);
+    setTrashConfirm({ path: node.path, name: node.name, size: node.size });
+  };
+
   const handleMoveToTrash = async (path: string) => {
     try {
       await invoke("move_to_trash_logged", {
         path,
         scan_path: rootNode?.path || undefined,
-        size_bytes: contextMenu?.node.size || undefined,
+        size_bytes: trashConfirm?.size ?? findNodeByPath(rootNode, path)?.size,
       });
-      setContextMenu(null);
+      setTrashConfirm(null);
 
       if (rootNode) {
         invoke("refresh_incremental").catch((e) =>
@@ -674,7 +690,7 @@ function App() {
       }
     } catch (e) {
       showError(`Failed to move to trash: ${e}`);
-      setContextMenu(null);
+      setTrashConfirm(null);
     }
   };
 
@@ -1361,22 +1377,73 @@ function App() {
         >
           <div
             className="context-menu-item"
-            onClick={() => handleShowInFinder(contextMenu.node.path)}
+            onClick={() =>
+              handleShowInFinder(
+                isMoreItemsPlaceholder(contextMenu.node)
+                  ? moreItemsParentPath(contextMenu.node)
+                  : contextMenu.node.path
+              )
+            }
           >
             <span>&#128193;</span> Show in Finder
           </div>
+          {!isMoreItemsPlaceholder(contextMenu.node) && (
+            <div
+              className="context-menu-item"
+              onClick={() => handleOpenFile(contextMenu.node.path)}
+            >
+              <span>&#128194;</span> Open
+            </div>
+          )}
+          {!isMoreItemsPlaceholder(contextMenu.node) && (
+            <>
+              <div className="context-menu-divider" />
+              <div
+                className="context-menu-item danger"
+                onClick={() => requestMoveToTrash(contextMenu.node)}
+              >
+                <span>&#128465;</span> Move to Trash
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Trash confirmation */}
+      {trashConfirm && (
+        <div
+          className="confirm-dialog-overlay"
+          onClick={() => setTrashConfirm(null)}
+        >
           <div
-            className="context-menu-item"
-            onClick={() => handleOpenFile(contextMenu.node.path)}
+            className="confirm-dialog"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="trash-confirm-title"
           >
-            <span>&#128194;</span> Open
-          </div>
-          <div className="context-menu-divider" />
-          <div
-            className="context-menu-item danger"
-            onClick={() => handleMoveToTrash(contextMenu.node.path)}
-          >
-            <span>&#128465;</span> Move to Trash
+            <h3 id="trash-confirm-title">Move to Trash?</h3>
+            <p>
+              Move <strong>{trashConfirm.name}</strong> to the Trash? This can
+              be undone from Finder.
+            </p>
+            <p className="confirm-dialog-path">{trashConfirm.path}</p>
+            <div className="confirm-dialog-actions">
+              <button
+                type="button"
+                className="confirm-dialog-cancel"
+                onClick={() => setTrashConfirm(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="confirm-dialog-danger"
+                onClick={() => handleMoveToTrash(trashConfirm.path)}
+              >
+                Move to Trash
+              </button>
+            </div>
           </div>
         </div>
       )}
