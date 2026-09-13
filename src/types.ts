@@ -9,32 +9,57 @@ export interface FileNode {
   file_count: number;
   dir_count: number;
   modified_at?: number;  // Unix timestamp in seconds
+  /** Synthetic "<N more items>" aggregation node (not a real filesystem path). */
+  is_placeholder?: boolean;
 }
 
-/** Sentinel suffix for truncated "<N more items>" placeholder nodes. */
-export const MORE_ITEMS_SENTINEL = "__other__";
+/** URI-style prefix for truncated more-items placeholders (not a filesystem path). */
+export const MORE_ITEMS_SCHEME = "spaceview:more-items:";
+
+/** Legacy path suffix from an earlier sentinel that could collide with real names. */
+const LEGACY_MORE_ITEMS_SENTINEL = "__other__";
 
 /** True for truncated more-items placeholders (never a real filesystem path). */
-export function isMoreItemsPlaceholder(node: Pick<FileNode, "id" | "name" | "path">): boolean {
-  return (
-    node.id.endsWith(`/${MORE_ITEMS_SENTINEL}`) ||
-    node.path.endsWith(`/${MORE_ITEMS_SENTINEL}`) ||
-    (node.name.startsWith("<") && node.name.includes("more items"))
-  );
+export function isMoreItemsPlaceholder(
+  node: Pick<FileNode, "id" | "name" | "path" | "is_placeholder">
+): boolean {
+  if (node.is_placeholder) return true;
+  if (node.id.startsWith(MORE_ITEMS_SCHEME) || node.path.startsWith(MORE_ITEMS_SCHEME)) {
+    return true;
+  }
+  // Legacy caches / older scan trees
+  if (
+    node.id.endsWith(`/${LEGACY_MORE_ITEMS_SENTINEL}`) ||
+    node.path.endsWith(`/${LEGACY_MORE_ITEMS_SENTINEL}`)
+  ) {
+    return true;
+  }
+  return node.name.startsWith("<") && node.name.includes("more items");
 }
 
 /**
  * Parent directory for a more-items placeholder.
- * Prefer id/path sentinel (`{parent}/__other__`); fall back to legacy nodes
- * that reused the parent path as `path`.
+ * Prefer URI scheme / explicit flag; fall back to legacy `__other__` suffix or
+ * nodes that reused the parent path as `path`.
  */
-export function moreItemsParentPath(node: Pick<FileNode, "id" | "name" | "path">): string {
-  const strip = (value: string) =>
-    value.endsWith(`/${MORE_ITEMS_SENTINEL}`)
-      ? value.slice(0, -(MORE_ITEMS_SENTINEL.length + 1))
+export function moreItemsParentPath(
+  node: Pick<FileNode, "id" | "name" | "path" | "is_placeholder">
+): string {
+  const stripScheme = (value: string) =>
+    value.startsWith(MORE_ITEMS_SCHEME) ? value.slice(MORE_ITEMS_SCHEME.length) : null;
+
+  const stripLegacy = (value: string) =>
+    value.endsWith(`/${LEGACY_MORE_ITEMS_SENTINEL}`)
+      ? value.slice(0, -(LEGACY_MORE_ITEMS_SENTINEL.length + 1))
       : null;
 
-  return strip(node.id) ?? strip(node.path) ?? node.path;
+  return (
+    stripScheme(node.id) ??
+    stripScheme(node.path) ??
+    stripLegacy(node.id) ??
+    stripLegacy(node.path) ??
+    node.path
+  );
 }
 
 export interface ScanProgress {

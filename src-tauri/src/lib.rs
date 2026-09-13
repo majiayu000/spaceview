@@ -2,7 +2,7 @@ mod cache;
 mod scanner;
 
 use cache::{CacheInfo, CachedScan, DeleteLogEntry, ScanHistoryEntry};
-use scanner::{FileNode, Scanner, ScannerState};
+use scanner::{FileNode, Scanner, ScannerState, MORE_ITEMS_SCHEME};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -602,21 +602,15 @@ fn open_file(path: String) -> Result<(), String> {
 
 /// Reject placeholder / out-of-scope paths before any trash operation.
 fn validate_trash_target(path: &str, scan_path: Option<&str>) -> Result<(), String> {
-    let path_buf = std::path::PathBuf::from(path);
-
-    // Truncated "<N more items>" cells use a non-existent `{parent}/__other__` sentinel.
-    if path_buf
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == "__other__")
-        || path.contains("/__other__")
-        || path.ends_with("__other__")
-    {
+    // Exact scheme match only — never substring-match real names like `__other__files`.
+    if path.starts_with(MORE_ITEMS_SCHEME) {
         return Err(
-            "Refusing to trash placeholder path (__other__). This is not a real file or folder."
+            "Refusing to trash more-items placeholder. This is not a real file or folder."
                 .to_string(),
         );
     }
+
+    let path_buf = std::path::PathBuf::from(path);
 
     if let Some(root) = scan_path {
         let root_buf = std::path::PathBuf::from(root);

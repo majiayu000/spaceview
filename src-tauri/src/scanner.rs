@@ -58,6 +58,10 @@ const MAX_DEPTH: usize = 64;      // Maximum tree depth (SpaceSniffer-style)
 const MAX_TOTAL_NODES: usize = 250_000;  // Absolute limit on total nodes in tree
 const MAX_SCANNED_NODES: usize = 1_000_000; // Hard cap to avoid exhausting RAM during walk
 
+/// URI-style prefix for truncated "<N more items>" placeholders.
+/// Not a filesystem path, so it cannot collide with real entries named `__other__`.
+pub const MORE_ITEMS_SCHEME: &str = "spaceview:more-items:";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
     pub id: String,
@@ -72,6 +76,9 @@ pub struct FileNode {
     pub dir_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<u64>,  // Unix timestamp in seconds
+    /// True for synthetic "<N more items>" aggregation nodes (not real paths).
+    #[serde(default)]
+    pub is_placeholder: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,6 +545,7 @@ impl Scanner {
                 file_count: 0,
                 dir_count: 0,
                 modified_at: node.modified_at,
+                is_placeholder: false,
             });
         }
 
@@ -582,13 +590,14 @@ impl Scanner {
         }
 
         if other_file_count + other_dir_count > 0 {
-            // Sentinel path must never resolve to a real directory — reusing the
-            // parent path made "Move to Trash" delete the entire parent folder.
-            let sentinel_path = format!("{}/__other__", path_str);
+            // Synthetic URI id/path — never a real filesystem location, so it cannot
+            // collide with a legitimate entry named `__other__` and cannot be trashed
+            // as a parent folder by accident.
+            let sentinel = format!("{}{}", MORE_ITEMS_SCHEME, path_str);
             children.push(FileNode {
-                id: sentinel_path.clone(),
+                id: sentinel.clone(),
                 name: format!("<{} more items>", other_file_count + other_dir_count),
-                path: sentinel_path,
+                path: sentinel,
                 size: other_size,
                 is_dir: true,
                 children: vec![],
@@ -596,12 +605,13 @@ impl Scanner {
                 file_count: other_file_count,
                 dir_count: other_dir_count,
                 modified_at: None,
+                is_placeholder: true,
             });
         }
 
         let file_count: u64 = children.iter()
             .map(|c| {
-                if c.is_dir && c.children.is_empty() && c.name.starts_with("<") {
+                if c.is_placeholder {
                     c.file_count
                 } else if c.is_dir {
                     c.file_count
@@ -612,7 +622,7 @@ impl Scanner {
             .sum();
         let dir_count: u64 = children.iter()
             .map(|c| {
-                if c.is_dir && c.children.is_empty() && c.name.starts_with("<") {
+                if c.is_placeholder {
                     c.dir_count
                 } else if c.is_dir {
                     1 + c.dir_count
@@ -634,6 +644,7 @@ impl Scanner {
             file_count,
             dir_count,
             modified_at: node.modified_at,
+            is_placeholder: false,
         })
     }
 }

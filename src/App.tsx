@@ -101,7 +101,7 @@ const TreemapLeafCell = React.memo(function TreemapLeafCell({
   // Handle double click - for "more items" navigate to parent folder
   const handleDoubleClick = () => {
     if (isMoreItems) {
-      // Sentinel path is `{parent}/__other__`; navigate to the real parent.
+      // Placeholder uses a synthetic id/path; navigate to the real parent.
       onNavigateToPath(moreItemsParentPath(rect.node));
     } else {
       onNavigate(rect.node);
