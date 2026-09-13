@@ -574,13 +574,42 @@ fn cancel_scan(state: State<'_, AppState>) {
     state.scanner_state.cancel();
 }
 
+/// Reject non-absolute / dash-prefixed paths before spawning external tools.
+fn validate_external_path(path: &str) -> Result<&str, String> {
+    if path.is_empty() {
+        return Err("Path must not be empty".to_string());
+    }
+    // Values starting with '-' are parsed as flags by open/df unless separated by `--`.
+    // Reject them outright so IPC cannot inject options even if `--` is omitted later.
+    if path.starts_with('-') {
+        return Err("Path must not start with '-'".to_string());
+    }
+    if !std::path::Path::new(path).is_absolute() {
+        return Err("Path must be absolute".to_string());
+    }
+    Ok(path)
+}
+
+fn open_reveal_argv(path: &str) -> [&str; 3] {
+    ["-R", "--", path]
+}
+
+fn open_file_argv(path: &str) -> [&str; 2] {
+    ["--", path]
+}
+
+fn df_path_argv(path: &str) -> [&str; 3] {
+    ["-k", "--", path]
+}
+
 /// Open path in Finder
 #[tauri::command]
 fn show_in_finder(path: String) -> Result<(), String> {
+    let path = validate_external_path(&path)?;
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .args(["-R", &path])
+            .args(open_reveal_argv(path))
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -590,10 +619,11 @@ fn show_in_finder(path: String) -> Result<(), String> {
 /// Open file with default application
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
+    let path = validate_external_path(&path)?;
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&path)
+            .args(open_file_argv(path))
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -698,7 +728,8 @@ pub struct DiskSpaceInfo {
 fn get_disk_info(path: String) -> Result<DiskSpaceInfo, String> {
     use std::path::Path;
 
-    let path = Path::new(&path);
+    let path = validate_external_path(&path)?;
+    let path = Path::new(path);
     if !path.exists() {
         return Err("Path does not exist".to_string());
     }
@@ -707,9 +738,11 @@ fn get_disk_info(path: String) -> Result<DiskSpaceInfo, String> {
     {
         use std::process::Command;
 
-        // Use df command to get disk info in bytes
+        let path_str = path.to_str().ok_or_else(|| "Invalid path encoding".to_string())?;
+
+        // Use df command to get disk info in bytes; path after `--` cannot be a flag
         let output = Command::new("df")
-            .args(["-k", path.to_str().unwrap_or("")])
+            .args(df_path_argv(path_str))
             .output()
             .map_err(|e| e.to_string())?;
 
@@ -771,4 +804,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod path_spawn_tests {
+    use super::{
+        df_path_argv, open_file_argv, open_reveal_argv, validate_external_path,
+    };
+
+    #[test]
+    fn rejects_dash_prefixed_and_relative_paths() {
+        assert!(validate_external_path("-R").is_err());
+        assert!(validate_external_path("--args").is_err());
+        assert!(validate_external_path("relative/path").is_err());
+        assert!(validate_external_path("").is_err());
+        assert_eq!(validate_external_path("/tmp/safe").unwrap(), "/tmp/safe");
+    }
+
+    #[test]
+    fn argv_places_path_after_double_dash() {
+        let path = "/tmp/-looks-like-flag";
+        assert_eq!(open_reveal_argv(path), ["-R", "--", path]);
+        assert_eq!(open_file_argv(path), ["--", path]);
+        assert_eq!(df_path_argv(path), ["-k", "--", path]);
+        assert!(open_reveal_argv(path).iter().position(|a| *a == "--") < open_reveal_argv(path).iter().position(|a| *a == path));
+        assert!(open_file_argv(path).iter().position(|a| *a == "--") < open_file_argv(path).iter().position(|a| *a == path));
+        assert!(df_path_argv(path).iter().position(|a| *a == "--") < df_path_argv(path).iter().position(|a| *a == path));
+    }
 }
