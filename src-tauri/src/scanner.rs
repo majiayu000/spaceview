@@ -146,6 +146,20 @@ impl Scanner {
     }
 
     pub fn scan(&self, root_path: &Path, app_handle: Option<&AppHandle>) -> Option<FileNode> {
+        self.scan_inner(root_path, app_handle, false)
+    }
+
+    // A multiply linked file may share bytes with an untouched subtree.
+    pub fn scan_subtree(&self, root_path: &Path) -> Option<FileNode> {
+        self.scan_inner(root_path, None, true)
+    }
+
+    fn scan_inner(
+        &self,
+        root_path: &Path,
+        app_handle: Option<&AppHandle>,
+        is_subtree: bool,
+    ) -> Option<FileNode> {
         self.state.reset();
 
         let total_start = Instant::now();
@@ -255,7 +269,7 @@ impl Scanner {
                 let (file_size, inode_key, modified_at) = if let Ok(ref meta) = metadata {
                     let dev = meta.dev();
                     let ino = meta.ino();
-                    if !is_dir && meta.nlink() > 1 {
+                    if is_subtree && !is_dir && meta.nlink() > 1 {
                         hard_links.store(true, Ordering::Relaxed);
                     }
                     let size = if is_dir { 0 } else { meta.len() };
@@ -279,6 +293,10 @@ impl Scanner {
                 } else {
                     false
                 };
+
+                if is_duplicate {
+                    hard_links.store(true, Ordering::Relaxed);
+                }
 
                 if is_dir {
                     dirs.fetch_add(1, Ordering::Relaxed);

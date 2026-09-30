@@ -302,7 +302,7 @@ async fn refresh_tree(
                 let subtree_state = scanner_state.clone();
                 if let Ok(Some(subtree)) = tokio::task::spawn_blocking(move || {
                     let scanner = Scanner::new(subtree_state);
-                    scanner.scan(&dir_clone, None)
+                    scanner.scan_subtree(&dir_clone)
                 })
                 .await
                 .map_err(|e| e.to_string())
@@ -316,8 +316,9 @@ async fn refresh_tree(
                             tokio::task::spawn_blocking(move || scanner.scan(&scan_root, None))
                                 .await
                                 .map_err(|e| e.to_string())?;
-                        if let Some(root) = result {
-                            next_root = root;
+                        match result {
+                            Some(root) => next_root = root,
+                            None => return Ok(None),
                         }
                         break;
                     }
@@ -820,8 +821,10 @@ pub fn run() {
 mod incremental_tests {
     use super::*;
     use std::path::Path;
+    use std::sync::atomic::AtomicU64;
 
     const FILE_SIZE: u64 = 4096;
+    static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
     struct Fixture {
         root: PathBuf,
@@ -834,9 +837,10 @@ mod incremental_tests {
                 .unwrap()
                 .as_nanos();
             let root = std::env::temp_dir().join(format!(
-                "spaceview-hardlinks-{}-{}",
+                "spaceview-hardlinks-{}-{}-{}",
                 std::process::id(),
-                unique
+                unique,
+                NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(root.join("a")).unwrap();
             fs::create_dir(root.join("b")).unwrap();
@@ -1009,5 +1013,88 @@ mod incremental_tests {
             (tree.size, tree.file_count, tree.dir_count)
         );
         assert!(!full_rescan);
+    }
+
+    #[tokio::test]
+    async fn out_of_tree_hardlink_does_not_disable_incremental_refresh() {
+        let fixture = Fixture::new(false);
+        let external = Fixture::new(false);
+        fs::hard_link(
+            fixture.root.join("a/file"),
+            external.root.join("external-link"),
+        )
+        .unwrap();
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        fs::write(fixture.root.join("b/new-file"), [b'y'; 37]).unwrap();
+        let (updated, full_rescan) = fixture
+            .refresh(state.clone(), tree, &fixture.root.join("b"))
+            .await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE + 37);
+        assert!(!full_rescan);
+
+        // Refreshing the linked file still conservatively checks the whole root.
+        fs::write(
+            fixture.root.join("a/file"),
+            vec![b'z'; FILE_SIZE as usize * 2],
+        )
+        .unwrap();
+        let (updated, full_rescan) = fixture
+            .refresh(state.clone(), updated, &fixture.root.join("a"))
+            .await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE * 2 + 37);
+        assert!(full_rescan);
+
+        fs::write(fixture.root.join("b/new-file"), [b'y'; 38]).unwrap();
+        let (updated, full_rescan) = fixture
+            .refresh(state, updated, &fixture.root.join("b"))
+            .await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE * 2 + 38);
+        assert!(!full_rescan);
+    }
+
+    #[tokio::test]
+    async fn cancelled_hardlink_escalation_does_not_publish_partial_tree() {
+        let fixture = Fixture::new(false);
+        // Give the root scan time to observe cancellation after the small subtree scan.
+        for index in 0..1024 {
+            fs::write(fixture.root.join("a").join(format!("ordinary-{index}")), []).unwrap();
+        }
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        assert!(!state.requires_full_refresh());
+        fs::hard_link(fixture.root.join("a/file"), fixture.root.join("b/link")).unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let cancel_state = state.clone();
+        let cancel_finished = finished.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let canceller = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut cancelled = false;
+            while !cancel_finished.load(Ordering::Acquire) {
+                // This becomes true only after the dirty-subtree scan succeeds.
+                if cancel_state.requires_full_refresh() {
+                    cancel_state.cancel();
+                    cancelled = true;
+                }
+                std::thread::yield_now();
+            }
+            cancelled
+        });
+        ready_rx.recv().unwrap();
+        let dirty_dirs = vec![fixture.root.join("b")];
+        let mut full_rescan = needs_full_rescan(&dirty_dirs, &fixture.root, &state);
+        let result = refresh_tree(
+            fixture.root.clone(),
+            &dirty_dirs,
+            Some(tree),
+            state,
+            &mut full_rescan,
+        )
+        .await;
+        finished.store(true, Ordering::Release);
+        assert!(canceller.join().unwrap());
+        assert!(full_rescan);
+        assert!(result.unwrap().is_none());
     }
 }
