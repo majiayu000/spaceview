@@ -264,9 +264,7 @@ async fn refresh_tree(
         let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
             .await
             .map_err(|e| e.to_string())?;
-        if let Some(root) = result {
-            updated_root = Some(root);
-        }
+        updated_root = result;
     } else if let Some(root) = updated_root.take() {
         let mut next_root = root;
         let mut effective_dirs: Vec<PathBuf> = Vec::new();
@@ -1051,6 +1049,95 @@ mod incremental_tests {
             .await;
         fixture.assert_matches_full_scan(&updated, FILE_SIZE * 2 + 38);
         assert!(!full_rescan);
+    }
+
+    #[tokio::test]
+    async fn unchanged_entry_full_rescan_preserves_hardlink_totals() {
+        for cached in [false, true] {
+            let fixture = Fixture::new(true);
+            let state = Arc::new(ScannerState::new());
+            let tree = fixture.scan(state.clone());
+            let state = if cached {
+                Arc::new(ScannerState::new())
+            } else {
+                state
+            };
+            let (updated, full_rescan) = fixture
+                .refresh(state, tree, &fixture.root.join("b"))
+                .await;
+            assert!(full_rescan);
+            fixture.assert_matches_full_scan(&updated, FILE_SIZE);
+        }
+    }
+
+    async fn assert_cancelled_entry_full_rescan(cached: bool) {
+        let fixture = Fixture::new(true);
+        // Keep the walk active long enough for cancellation after scan_inner resets it.
+        for index in 0..1024 {
+            fs::write(fixture.root.join("a").join(format!("ordinary-{index}")), []).unwrap();
+        }
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        let state = if cached {
+            Arc::new(ScannerState::new())
+        } else {
+            state
+        };
+        fs::write(fixture.root.join("b/new-file"), [b'y'; 37]).unwrap();
+        assert!(!node_exists(
+            &tree,
+            &fixture.root.join("b/new-file").to_string_lossy()
+        ));
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let cancel_state = state.clone();
+        let cancel_finished = finished.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let canceller = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            while !cancel_finished.load(Ordering::Acquire) {
+                cancel_state.cancel();
+                std::thread::yield_now();
+            }
+        });
+        ready_rx.recv().unwrap();
+        let dirty_dirs = coalesce_dirty_dirs(
+            HashSet::from([fixture.root.join("b/new-file")]),
+            &fixture.root,
+        );
+        let mut full_rescan = needs_full_rescan(&dirty_dirs, &fixture.root, &state);
+        assert!(full_rescan);
+        let result = refresh_tree(
+            fixture.root.clone(),
+            &dirty_dirs,
+            Some(tree.clone()),
+            state.clone(),
+            &mut full_rescan,
+        )
+        .await;
+        finished.store(true, Ordering::Release);
+        canceller.join().unwrap();
+        assert!(state.is_cancelled());
+        assert!(state.requires_full_refresh());
+        assert!(full_rescan);
+        assert!(result.unwrap().is_none());
+
+        // A later successful full scan still includes the change and deduplicates links.
+        let (updated, full_rescan) = fixture
+            .refresh(state, tree, &fixture.root.join("b"))
+            .await;
+        assert!(full_rescan);
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE + 37);
+    }
+
+    #[tokio::test]
+    async fn cancelled_entry_full_rescan_with_hardlinks_returns_no_update() {
+        assert_cancelled_entry_full_rescan(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_entry_full_rescan_with_cached_tree_returns_no_update() {
+        assert_cancelled_entry_full_rescan(true).await;
     }
 
     #[tokio::test]
