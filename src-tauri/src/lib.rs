@@ -242,6 +242,96 @@ fn replace_subtree(mut root: FileNode, target_path: &str, new_subtree: &FileNode
     root
 }
 
+fn needs_full_rescan(
+    dirty_dirs: &[PathBuf],
+    root_path: &PathBuf,
+    scanner_state: &ScannerState,
+) -> bool {
+    dirty_dirs.len() > 40
+        || dirty_dirs.iter().any(|p| p == root_path)
+        || scanner_state.requires_full_refresh()
+}
+
+async fn refresh_tree(
+    root_path: PathBuf,
+    dirty_dirs: &[PathBuf],
+    mut updated_root: Option<FileNode>,
+    scanner_state: Arc<ScannerState>,
+    full_rescan: &mut bool,
+) -> Result<Option<FileNode>, String> {
+    if updated_root.is_none() || *full_rescan {
+        let scanner = Scanner::new(scanner_state.clone());
+        let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(root) = result {
+            updated_root = Some(root);
+        }
+    } else if let Some(root) = updated_root.take() {
+        let mut next_root = root;
+        let mut effective_dirs: Vec<PathBuf> = Vec::new();
+        for dir in dirty_dirs.iter() {
+            let target = dir.to_string_lossy().to_string();
+            if node_exists(&next_root, &target) {
+                effective_dirs.push(dir.clone());
+            } else if let Some(parent) = dir.parent() {
+                effective_dirs.push(parent.to_path_buf());
+            } else {
+                effective_dirs.push(root_path.clone());
+            }
+        }
+
+        effective_dirs.sort();
+        effective_dirs.dedup();
+
+        if effective_dirs.iter().any(|p| p == &root_path) {
+            let scanner = Scanner::new(scanner_state.clone());
+            let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(root) = result {
+                updated_root = Some(root);
+            }
+        } else {
+            let scanner_state = scanner_state.clone();
+            for dir in effective_dirs {
+                if dir == root_path {
+                    continue;
+                }
+                let dir_clone = dir.clone();
+                let subtree_state = scanner_state.clone();
+                if let Ok(Some(subtree)) = tokio::task::spawn_blocking(move || {
+                    let scanner = Scanner::new(subtree_state);
+                    scanner.scan(&dir_clone, None)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                {
+                    if scanner_state.requires_full_refresh() {
+                        // A new hard link can share bytes with an untouched subtree.
+                        *full_rescan = true;
+                        let scanner = Scanner::new(scanner_state.clone());
+                        let scan_root = root_path.clone();
+                        let result =
+                            tokio::task::spawn_blocking(move || scanner.scan(&scan_root, None))
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        if let Some(root) = result {
+                            next_root = root;
+                        }
+                        break;
+                    }
+                    let target = dir.to_string_lossy().to_string();
+                    next_root = replace_subtree(next_root, &target, &subtree);
+                }
+            }
+            updated_root = Some(next_root);
+        }
+    }
+
+    Ok(updated_root)
+}
+
 async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
     if state.scan_in_progress.swap(true, Ordering::Relaxed) {
@@ -289,7 +379,7 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
 
     let dirty_dirs = coalesce_dirty_dirs(dirty_paths, &root_path);
     let dirty_count = dirty_dirs.len();
-    let full_rescan = dirty_dirs.len() > 40 || dirty_dirs.iter().any(|p| p == &root_path);
+    let mut full_rescan = needs_full_rescan(&dirty_dirs, &root_path, &state.scanner_state);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -306,66 +396,18 @@ async fn perform_incremental_refresh(app_handle: AppHandle) -> Result<(), String
         },
     );
 
-    let mut updated_root = {
+    let current_root = {
         let tree_guard = state.current_tree.lock().unwrap();
         tree_guard.clone()
     };
-
-    if updated_root.is_none() || full_rescan {
-        let scanner = Scanner::new(state.scanner_state.clone());
-        let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
-            .await
-            .map_err(|e| e.to_string())?;
-        if let Some(root) = result {
-            updated_root = Some(root);
-        }
-    } else if let Some(root) = updated_root.take() {
-        let mut next_root = root;
-        let mut effective_dirs: Vec<PathBuf> = Vec::new();
-        for dir in dirty_dirs.iter() {
-            let target = dir.to_string_lossy().to_string();
-            if node_exists(&next_root, &target) {
-                effective_dirs.push(dir.clone());
-            } else if let Some(parent) = dir.parent() {
-                effective_dirs.push(parent.to_path_buf());
-            } else {
-                effective_dirs.push(root_path.clone());
-            }
-        }
-
-        effective_dirs.sort();
-        effective_dirs.dedup();
-
-        if effective_dirs.iter().any(|p| p == &root_path) {
-            let scanner = Scanner::new(state.scanner_state.clone());
-            let result = tokio::task::spawn_blocking(move || scanner.scan(&root_path, None))
-                .await
-                .map_err(|e| e.to_string())?;
-            if let Some(root) = result {
-                updated_root = Some(root);
-            }
-        } else {
-            let scanner_state = state.scanner_state.clone();
-            for dir in effective_dirs {
-                if dir == root_path {
-                    continue;
-                }
-                let dir_clone = dir.clone();
-                let scanner_state = scanner_state.clone();
-                if let Ok(Some(subtree)) = tokio::task::spawn_blocking(move || {
-                    let scanner = Scanner::new(scanner_state);
-                    scanner.scan(&dir_clone, None)
-                })
-                .await
-                .map_err(|e| e.to_string())
-                {
-                    let target = dir.to_string_lossy().to_string();
-                    next_root = replace_subtree(next_root, &target, &subtree);
-                }
-            }
-            updated_root = Some(next_root);
-        }
-    }
+    let updated_root = refresh_tree(
+        root_path,
+        &dirty_dirs,
+        current_root,
+        state.scanner_state.clone(),
+        &mut full_rescan,
+    )
+    .await?;
 
     let result = if let Some(root) = updated_root {
         {
@@ -438,6 +480,7 @@ async fn scan_directory(
     if should_use_cache {
         if let Ok(cached) = cache::load_from_cache(&path) {
             println!("[Scan] Using cached result for {}", path);
+            state.scanner_state.require_full_refresh();
             // Emit cache-loaded event
             let _ = app_handle.emit("scan-from-cache", &cached);
             {
@@ -771,4 +814,200 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+    use std::path::Path;
+
+    const FILE_SIZE: u64 = 4096;
+
+    struct Fixture {
+        root: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(hard_link: bool) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "spaceview-hardlinks-{}-{}",
+                std::process::id(),
+                unique
+            ));
+            fs::create_dir_all(root.join("a")).unwrap();
+            fs::create_dir(root.join("b")).unwrap();
+            fs::write(root.join("a/file"), vec![b'x'; FILE_SIZE as usize]).unwrap();
+            if hard_link {
+                fs::hard_link(root.join("a/file"), root.join("b/link")).unwrap();
+            }
+            Self { root }
+        }
+
+        fn scan(&self, state: Arc<ScannerState>) -> FileNode {
+            Scanner::new(state).scan(&self.root, None).unwrap()
+        }
+
+        fn link_path(&self, tree: &FileNode, counted: bool) -> PathBuf {
+            tree.children
+                .iter()
+                .flat_map(|dir| &dir.children)
+                .find(|file| (file.size > 0) == counted)
+                .map(|file| PathBuf::from(&file.path))
+                .unwrap()
+        }
+
+        async fn refresh(
+            &self,
+            state: Arc<ScannerState>,
+            tree: FileNode,
+            dir: &Path,
+        ) -> (FileNode, bool) {
+            let dirty_dirs = coalesce_dirty_dirs(HashSet::from([dir.to_path_buf()]), &self.root);
+            let mut full_rescan = needs_full_rescan(&dirty_dirs, &self.root, &state);
+            let updated = refresh_tree(
+                self.root.clone(),
+                &dirty_dirs,
+                Some(tree),
+                state,
+                &mut full_rescan,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            (updated, full_rescan)
+        }
+
+        fn assert_matches_full_scan(&self, incremental: &FileNode, expected_size: u64) {
+            let full = self.scan(Arc::new(ScannerState::new()));
+            assert_eq!(
+                (full.size, full.file_count, full.dir_count),
+                (
+                    incremental.size,
+                    incremental.file_count,
+                    incremental.dir_count
+                )
+            );
+            assert_eq!(incremental.size, expected_size);
+            assert_eq!(
+                incremental.children.iter().map(|dir| dir.size).sum::<u64>(),
+                expected_size
+            );
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn refreshing_zeroed_hardlink_does_not_double_count() {
+        let fixture = Fixture::new(true);
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        assert_eq!(tree.size, FILE_SIZE);
+        let zero_link = fixture.link_path(&tree, false);
+        let dir = zero_link.parent().unwrap();
+        fs::write(dir.join("new-file"), [b'y'; 37]).unwrap();
+        let (updated, full_rescan) = fixture.refresh(state, tree, dir).await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE + 37);
+        assert!(full_rescan);
+    }
+
+    #[tokio::test]
+    async fn changing_zeroed_hardlink_updates_unique_size() {
+        let fixture = Fixture::new(true);
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        let zero_link = fixture.link_path(&tree, false);
+        fs::write(&zero_link, vec![b'z'; FILE_SIZE as usize * 2]).unwrap();
+        let (updated, full_rescan) = fixture
+            .refresh(state, tree, zero_link.parent().unwrap())
+            .await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE * 2);
+        assert!(full_rescan);
+    }
+
+    #[tokio::test]
+    async fn deleting_counted_hardlink_keeps_remaining_bytes() {
+        let fixture = Fixture::new(true);
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        let counted_link = fixture.link_path(&tree, true);
+        fs::remove_file(&counted_link).unwrap();
+        let (updated, full_rescan) = fixture
+            .refresh(state, tree, counted_link.parent().unwrap())
+            .await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE);
+        assert!(full_rescan);
+    }
+
+    #[tokio::test]
+    async fn newly_created_hardlink_requires_full_scan() {
+        let fixture = Fixture::new(false);
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        fs::hard_link(fixture.root.join("a/file"), fixture.root.join("b/link")).unwrap();
+        let (updated, full_rescan) = fixture.refresh(state, tree, &fixture.root.join("b")).await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE);
+        assert!(full_rescan);
+    }
+
+    #[tokio::test]
+    async fn cached_tree_refresh_preserves_hardlink_deduplication() {
+        let fixture = Fixture::new(true);
+        let tree = fixture.scan(Arc::new(ScannerState::new()));
+        let zero_link = fixture.link_path(&tree, false);
+        fs::write(zero_link.parent().unwrap().join("new-file"), [b'y'; 37]).unwrap();
+        // Cached trees have no in-memory scanner metadata.
+        let (updated, full_rescan) = fixture
+            .refresh(
+                Arc::new(ScannerState::new()),
+                tree,
+                zero_link.parent().unwrap(),
+            )
+            .await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE + 37);
+        assert!(full_rescan);
+    }
+
+    #[tokio::test]
+    async fn ordinary_files_still_refresh_incrementally() {
+        let fixture = Fixture::new(false);
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        fs::write(fixture.root.join("b/new-file"), [b'y'; 37]).unwrap();
+        let (updated, full_rescan) = fixture.refresh(state, tree, &fixture.root.join("b")).await;
+        fixture.assert_matches_full_scan(&updated, FILE_SIZE + 37);
+        assert!(!full_rescan);
+    }
+
+    #[tokio::test]
+    async fn missing_subtree_scan_keeps_previous_tree() {
+        let fixture = Fixture::new(false);
+        let state = Arc::new(ScannerState::new());
+        let tree = fixture.scan(state.clone());
+        fs::remove_dir_all(fixture.root.join("a")).unwrap();
+        let mut full_rescan = false;
+        let updated = refresh_tree(
+            fixture.root.clone(),
+            &[fixture.root.join("a")],
+            Some(tree.clone()),
+            state,
+            &mut full_rescan,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (updated.size, updated.file_count, updated.dir_count),
+            (tree.size, tree.file_count, tree.dir_count)
+        );
+        assert!(!full_rescan);
+    }
 }
