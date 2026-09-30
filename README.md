@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>High-performance disk space analyzer for macOS</strong>
+  <strong>Disk space analyzer for macOS with an interactive treemap</strong>
 </p>
 
 <p align="center">
@@ -17,6 +17,9 @@
 </p>
 
 ---
+
+SpaceView helps you find files and folders taking up disk space, then inspect them in Finder
+or explore their sizes in a treemap. Built with Tauri, Rust, and React.
 
 ## Screenshots
 
@@ -51,7 +54,8 @@ Tested on a MacBook Pro scanning ~/Desktop with 1.4M+ files:
 
 ### Download
 
-Download the latest release from the [Releases](https://github.com/majiayu000/spaceview/releases) page.
+No packaged GitHub release is currently available. Use the source build below; future
+packages will be listed on the [Releases](https://github.com/majiayu000/spaceview/releases) page.
 
 ### Build from Source
 
