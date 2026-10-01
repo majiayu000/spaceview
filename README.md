@@ -12,6 +12,7 @@
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
   <a href="#usage">Usage</a> •
+  <a href="docs/find-large-files.md">Find large files</a> •
   <a href="#tech-stack">Tech Stack</a> •
   <a href="#development">Development</a>
 </p>
