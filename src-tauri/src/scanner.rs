@@ -86,11 +86,24 @@ pub struct ScanProgress {
 
 pub struct ScannerState {
     is_cancelled: AtomicBool,
+    // Cached trees have no inode metadata, so their first refresh must be full.
+    requires_full_refresh: AtomicBool,
 }
 
 impl ScannerState {
     pub fn new() -> Self {
-        Self { is_cancelled: AtomicBool::new(false) }
+        Self {
+            is_cancelled: AtomicBool::new(false),
+            requires_full_refresh: AtomicBool::new(true),
+        }
+    }
+
+    pub fn requires_full_refresh(&self) -> bool {
+        self.requires_full_refresh.load(Ordering::Acquire)
+    }
+
+    pub fn require_full_refresh(&self) {
+        self.requires_full_refresh.store(true, Ordering::Release);
     }
 
     /// Cancel the scan - uses Release ordering to ensure visibility across threads
@@ -133,6 +146,20 @@ impl Scanner {
     }
 
     pub fn scan(&self, root_path: &Path, app_handle: Option<&AppHandle>) -> Option<FileNode> {
+        self.scan_inner(root_path, app_handle, false)
+    }
+
+    // A multiply linked file may share bytes with an untouched subtree.
+    pub fn scan_subtree(&self, root_path: &Path) -> Option<FileNode> {
+        self.scan_inner(root_path, None, true)
+    }
+
+    fn scan_inner(
+        &self,
+        root_path: &Path,
+        app_handle: Option<&AppHandle>,
+        is_subtree: bool,
+    ) -> Option<FileNode> {
         self.state.reset();
 
         let total_start = Instant::now();
@@ -153,6 +180,7 @@ impl Scanner {
         // Track seen inodes to avoid counting hard links multiple times
         // Key: (device_id, inode) - uniquely identifies a file on disk
         let seen_inodes: Arc<DashSet<(u64, u64)>> = Arc::new(DashSet::new());
+        let has_hard_links = Arc::new(AtomicBool::new(false));
 
         // Progress channel for UI updates
         let (progress_tx, progress_rx) = bounded::<(u64, u64, u64, String)>(100);
@@ -213,6 +241,7 @@ impl Scanner {
             let cancel = cancel_clone.clone();
             let tx = progress_tx_clone.clone();
             let seen = seen_inodes_clone.clone();
+            let hard_links = has_hard_links.clone();
             let limit_hit = hard_limit_hit.clone();
             let mut counter: u64 = 0;
 
@@ -240,6 +269,9 @@ impl Scanner {
                 let (file_size, inode_key, modified_at) = if let Ok(ref meta) = metadata {
                     let dev = meta.dev();
                     let ino = meta.ino();
+                    if is_subtree && !is_dir && meta.nlink() > 1 {
+                        hard_links.store(true, Ordering::Relaxed);
+                    }
                     let size = if is_dir { 0 } else { meta.len() };
                     let mtime = meta.modified().ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -261,6 +293,10 @@ impl Scanner {
                 } else {
                     false
                 };
+
+                if is_duplicate {
+                    hard_links.store(true, Ordering::Relaxed);
+                }
 
                 if is_dir {
                     dirs.fetch_add(1, Ordering::Relaxed);
@@ -455,6 +491,12 @@ impl Scanner {
             });
         }
 
+        if tree.is_some() {
+            self.state.requires_full_refresh.store(
+                has_hard_links.load(Ordering::Relaxed),
+                Ordering::Release,
+            );
+        }
         tree
     }
 
